@@ -24,7 +24,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { NCard, NProgress, NButton, NSpin, useMessage } from 'naive-ui'
+import { NCard, NProgress, NButton, NSpin } from 'naive-ui'
 import { jobApi } from '@/api/book'
 import type { JobStatusResponse } from '@/types/api'
 
@@ -38,7 +38,6 @@ const emit = defineEmits<{
   completed: [status: JobStatusResponse]
 }>()
 
-const message = useMessage()
 const status = ref<JobStatusResponse | null>(null)
 let pollInterval: number | null = null
 
@@ -88,11 +87,9 @@ const handleCancel = async () => {
 
   try {
     await jobApi.cancelJob(props.jobId)
-    message.success('任务已取消')
     stopPolling()
   } catch (error) {
     console.error('Failed to cancel job:', error)
-    message.error('取消失败，请稍后重试')
   }
 }
 
