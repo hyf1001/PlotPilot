@@ -193,15 +193,23 @@ const paragraphCount = computed(() =>
   content.value ? content.value.split(/\n\s*\n/).filter(p => p.trim()).length : 0
 )
 
-const cachedPreviewHtml = ref<string>('')
-const previewHtml = computed(() => {
-  if (!content.value) return cachedPreviewHtml.value
+const previewHtml = ref<string>('')
+const markdownDebounceTimer = ref<ReturnType<typeof setTimeout> | null>(null)
 
-  const html = marked.parse(content.value, { breaks: true, async: false }) as string
-  const sanitizedHtml = DOMPurify.sanitize(html)
-  cachedPreviewHtml.value = sanitizedHtml
-  return sanitizedHtml
-})
+const updatePreview = (debounce = false) => {
+  const parseMarkdown = () => {
+    const html = marked.parse(content.value, { breaks: true, async: false }) as string
+    const sanitizedHtml = DOMPurify.sanitize(html)
+    previewHtml.value = sanitizedHtml
+  }
+
+  if (debounce) {
+    if (markdownDebounceTimer.value) clearTimeout(markdownDebounceTimer.value)
+    markdownDebounceTimer.value = window.setTimeout(parseMarkdown, 300)
+  } else {
+    parseMarkdown()
+  }
+}
 
 const saveStatusText = computed(() => {
   const map = { unsaved: '未保存', saving: '保存中…', saved: '已保存' }
@@ -242,6 +250,7 @@ const handleToolSelect = (key: string) => {
   if (key === 'clear') {
     content.value = ''
     onInput()
+    updatePreview(false)
   }
 }
 
@@ -251,6 +260,7 @@ const onInput = () => {
   saveTimer.value = window.setTimeout(() => {
     void saveContent()
   }, 30000)
+  updatePreview(true)
 }
 
 const saveContent = async () => {
@@ -355,6 +365,7 @@ const loadChapter = async () => {
       createTime.value = new Date().toLocaleString('zh-CN', { hour12: false })
       updateTime.value = createTime.value
     }
+    updatePreview(false)
   } else {
     console.error('Failed to load chapter body:', body.reason)
   }
@@ -414,6 +425,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeySave)
   if (saveTimer.value) clearTimeout(saveTimer.value)
+  if (markdownDebounceTimer.value) clearTimeout(markdownDebounceTimer.value)
 })
 </script>
 
