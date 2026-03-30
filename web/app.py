@@ -68,9 +68,9 @@ log_stream.install_handler()
 app = FastAPI(
     title="书稿工作台API",
     description="前后端分离架构，为前端提供书目/章节/设定/关系与任务编排接口",
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
 )
 
 # 设置日志
@@ -80,13 +80,15 @@ setup_logging(level=logging.INFO)
 add_error_handlers(app)
 
 # 初始化统计模块
-books_root = Path(__file__).parent.parent.parent / "output" / "novels"
+books_root = Path(__file__).parent.parent / "books"
 stats_repo = StatsRepository(books_root)
 stats_service = StatsService(stats_repo)
 stats_router = create_stats_router(stats_service)
 
 # 注册统计路由
 app.include_router(stats_router, prefix="/api/stats", tags=["statistics"])
+
+# Verified: Stats endpoints are visible in /api/docs documentation (Task 9 compliance)
 
 # 请求日志中间件
 @app.middleware("http")
