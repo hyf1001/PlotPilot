@@ -3,8 +3,10 @@
 整合所有子项目组件，实现完整的章节生成流程。
 """
 import logging
-from typing import Tuple, Dict, Any, AsyncIterator
+from typing import Tuple, Dict, Any, AsyncIterator, Optional
 from application.services.context_builder import ContextBuilder
+from application.services.state_extractor import StateExtractor
+from application.services.state_updater import StateUpdater
 from application.dtos.generation_result import GenerationResult
 from domain.novel.services.consistency_checker import ConsistencyChecker
 from domain.novel.services.storyline_manager import StorylineManager
@@ -61,7 +63,9 @@ class AutoNovelGenerationWorkflow:
         consistency_checker: ConsistencyChecker,
         storyline_manager: StorylineManager,
         plot_arc_repository: PlotArcRepository,
-        llm_service: LLMService
+        llm_service: LLMService,
+        state_extractor: Optional[StateExtractor] = None,
+        state_updater: Optional[StateUpdater] = None
     ):
         """初始化工作流
 
@@ -71,12 +75,16 @@ class AutoNovelGenerationWorkflow:
             storyline_manager: 故事线管理器
             plot_arc_repository: 情节弧仓储
             llm_service: LLM 服务
+            state_extractor: 状态提取器（可选）
+            state_updater: 状态更新器（可选）
         """
         self.context_builder = context_builder
         self.consistency_checker = consistency_checker
         self.storyline_manager = storyline_manager
         self.plot_arc_repository = plot_arc_repository
         self.llm_service = llm_service
+        self.state_extractor = state_extractor
+        self.state_updater = state_updater
 
     async def generate_chapter(
         self,
@@ -129,8 +137,17 @@ class AutoNovelGenerationWorkflow:
 
         # Phase 4: Post-Generation - 提取状态和检查一致性
         logger.debug("Phase 4: Post-Generation - Extracting state and checking consistency")
-        chapter_state = self._extract_chapter_state(content, chapter_number)
+        chapter_state = await self._extract_chapter_state(content, chapter_number)
         consistency_report = self._check_consistency(chapter_state, novel_id)
+
+        # Phase 4.5: Update State - 更新 Bible 和 Knowledge
+        if self.state_updater:
+            try:
+                logger.info(f"Updating Bible and Knowledge for chapter {chapter_number}")
+                self.state_updater.update_from_chapter(novel_id, chapter_number, chapter_state)
+                logger.info("State update completed")
+            except Exception as e:
+                logger.warning(f"StateUpdater failed: {e}")
 
         # Phase 5: Review - 返回结果
         logger.info(f"Chapter generation completed: novel={novel_id}, chapter={chapter_number}")
@@ -189,8 +206,18 @@ class AutoNovelGenerationWorkflow:
                 return
 
             yield {"type": "phase", "phase": "post"}
-            chapter_state = self._extract_chapter_state(content, chapter_number)
+            chapter_state = await self._extract_chapter_state(content, chapter_number)
             consistency_report = self._check_consistency(chapter_state, novel_id)
+
+            # Phase 4.5: Update State - 更新 Bible 和 Knowledge
+            if self.state_updater:
+                try:
+                    logger.info(f"Updating Bible and Knowledge for chapter {chapter_number}")
+                    self.state_updater.update_from_chapter(novel_id, chapter_number, chapter_state)
+                    logger.info("State update completed")
+                except Exception as e:
+                    logger.warning(f"StateUpdater failed: {e}")
+
             token_count = self.context_builder.estimate_tokens(context)
 
             yield {
@@ -355,7 +382,7 @@ class AutoNovelGenerationWorkflow:
 
         return Prompt(system=system_message, user=user_message)
 
-    def _extract_chapter_state(self, content: str, chapter_number: int) -> ChapterState:
+    async def _extract_chapter_state(self, content: str, chapter_number: int) -> ChapterState:
         """从生成的内容中提取章节状态
 
         Args:
@@ -365,8 +392,15 @@ class AutoNovelGenerationWorkflow:
         Returns:
             ChapterState 对象
         """
-        # 基本实现：返回空状态
-        # 实际应该使用 NLP 或 LLM 提取结构化信息
+        # 如果有 StateExtractor，使用它提取状态
+        if self.state_extractor:
+            try:
+                logger.info(f"Extracting chapter state using StateExtractor for chapter {chapter_number}")
+                return await self.state_extractor.extract_chapter_state(content)
+            except Exception as e:
+                logger.warning(f"StateExtractor failed: {e}, returning empty state")
+
+        # 降级：返回空状态
         return ChapterState(
             new_characters=[],
             character_actions=[],

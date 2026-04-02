@@ -15,3 +15,94 @@ Consistency check failed: __init__() missing 1 required positional argument: 'no
 [DEBUG] Attempting to save chapter 1
 [DEBUG] EntityNotFoundError caught: Chapter with id 'test-quality-1/chapter-1' not found
 [DEBUG] Chapter 1 created successfully
+INFO:     127.0.0.1:60962 - "POST /api/v1/novels/test-quality-1/hosted-write-stream HTTP/1.1" 200 OK
+[HOSTED_WRITE_V2] Starting stream_hosted_write for novel test-quality-1, chapters 2-2, auto_save=True
+Consistency check failed: __init__() missing 1 required positional argument: 'novel_id'
+[DEBUG] Attempting to save chapter 2
+[DEBUG] EntityNotFoundError caught: Chapter with id 'test-quality-1/chapter-2' not found
+[DEBUG] Chapter 2 created successfully
+INFO:     127.0.0.1:65495 - "GET /api/v1/novels/test-quality-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49312 - "GET /api/v1/novels/test-quality-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49314 - "GET /api/v1/novels/test-quality-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55522 - "GET /api/v1/novels/test-quality-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55522 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58391 - "GET /api/v1/novels/novel-1775066530753/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58395 - "GET /api/v1/novels/novel-1775094561562/statistics HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58396 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58397 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58399 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58403 - "GET /api/v1/novels/novel-1775094561562/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58404 - "GET /api/v1/novels/novel-1775094561562 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58405 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58409 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:58411 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58413 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58408 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50742 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63129 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:63130 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57477 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61718 - "GET /api/v1/novels/novel-1775094561562/statistics HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54200 - "GET /api/v1/novels/novel-1775094561562/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54202 - "GET /api/v1/novels/novel-1775094561562 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54204 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64121 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64878 - "GET /api/v1/novels/novel-1775094561562/statistics HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:64882 - "GET /api/v1/novels/novel-1775094561562/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64883 - "GET /api/v1/novels/novel-1775094561562 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:64884 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64886 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54614 - "GET /api/v1/novels/novel-1775094561562/statistics HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54620 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54618 - "GET /api/v1/novels/novel-1775094561562/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54619 - "GET /api/v1/novels/novel-1775094561562 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58055 - "GET /api/v1/novels/novel-1775094561562/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62498 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:62497 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53069 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51488 - "GET /api/v1/novels/novel-1775066530753/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51490 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51493 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51494 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53964 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55668 - "GET /api/v1/novels/novel-1775066530753/chapters/2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50518 - "GET /api/v1/novels/novel-1775066530753/chapters/4 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53071 - "GET /api/v1/novels/novel-1775066530753/chapters/3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50927 - "GET /api/v1/novels/novel-1775066530753/cast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57861 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55524 - "GET /api/v1/bible/novels/novel-1775066530753/bible HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59774 - "GET /api/v1/novels/novel-1775066530753/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59778 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59780 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59779 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59782 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59784 - "GET /api/v1/novels/novel-1775066530753/cast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64326 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52008 - "GET /api/v1/bible/novels/novel-1775066530753/bible HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62048 - "GET /api/v1/novels/novel-1775066530753/chapters/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55318 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:55317 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59790 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58647 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58649 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58648 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61820 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55524 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:59790 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62616 - "GET /api/v1/novels/test-quality-1/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51877 - "GET /api/v1/novels/test-quality-1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51876 - "GET /api/v1/novels/test-quality-1/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51878 - "GET /api/v1/novels/test-quality-1/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53150 - "GET /api/v1/novels/test-quality-1/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51930 - "GET /api/v1/novels/test-quality-1/cast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65371 - "GET /api/v1/novels/test-quality-1/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54841 - "GET /api/v1/bible/novels/test-quality-1/bible HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52379 - "GET /api/v1/novels/test-quality-1/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50062 - "GET /api/v1/novels/test-quality-1/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49702 - "GET /api/v1/novels/test-quality-1/cast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50386 - "GET /api/v1/novels/test-quality-1/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54703 - "GET /api/v1/novels/test-quality-1/cast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64990 - "GET /api/v1/novels/test-quality-1/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65375 - "GET /api/v1/novels/test-quality-1/cast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49970 - "GET /api/v1/novels/test-quality-1/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61210 - "GET /api/v1/bible/novels/test-quality-1/bible HTTP/1.1" 200 OK

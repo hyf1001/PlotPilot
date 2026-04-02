@@ -8,4 +8,30 @@ Port 3001 is in use, trying another one...
   [32m[1mVITE[22m v8.0.3[39m  [2mready in [0m[1m253[22m[2m[0m ms[22m
 
   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m3002[22m/[39m
-[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: u[2m00:15:35[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/stats/global[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1142:49)
+    at afterConnectMultiple (node:net:1723:7)
+[2m00:15:35[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/v1/novels[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1142:49)
+    at afterConnectMultiple (node:net:1723:7)
+[2m00:15:35[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mFailed to load stats: AxiosError: Request failed with status code 502
+    at settle (http://localhost:3001/node_modules/.vite/deps/axios.js?v=23ea2cf4:1634:14)
+    at XMLHttpRequest.onloadend (http://localhost:3001/node_modules/.vite/deps/axios.js?v=23ea2cf4:1951:4)
+    at Axios$1.request (http://localhost:3001/node_modules/.vite/deps/axios.js?v=23ea2cf4:2520:37)
+    at async Proxy.loadGlobalStats (http://localhost:3001/src/stores/statsStore.ts:51:17)
+    at async http://localhost:3001/src/components/stats/StatsSidebar.vue:16:5
+[2m00:18:51[22m [36m[1m[vite][22m[39m [32mvite.config.ts changed, restarting server...[39m
+[2m00:18:51[22m [36m[1m[vite][22m[39m server restarted.
+]: 
+    at internalConnectMultiple (node:net:1142:49)
+    at afterConnectMultiple (node:net:1723:7)
+[2m00:15:29[22m [31m[1m[vite][22m[39m [31m[2m(client)[22m[39m [2m[console.error] [22mFailed to refresh stats: AxiosError: Request failed with status code 502
+    at settle (http://localhost:3002/node_modules/.vite/deps/axios.js?v=23ea2cf4:1634:14)
+    at XMLHttpRequest.onloadend (http://localhost:3002/node_modules/.vite/deps/axios.js?v=23ea2cf4:1951:4)
+    at Axios$1.request (http://localhost:3002/node_modules/.vite/deps/axios.js?v=23ea2cf4:2520:37)
+    at async Proxy.loadGlobalStats (http://localhost:3002/src/stores/statsStore.ts:51:17)
+    at async handleRefresh (http://localhost:3002/src/components/stats/StatsSidebar.vue:33:5)
+[2m00:18:51[22m [36m[1m[vite][22m[39m [32mvite.config.ts changed, restarting server...[39m
+[2m00:18:51[22m [36m[1m[vite][22m[39m server restarted.

@@ -18,6 +18,7 @@ from infrastructure.persistence.repositories.file_knowledge_repository import Fi
 from infrastructure.persistence.repositories.file_chat_repository import FileChatRepository
 from infrastructure.persistence.repositories.file_storyline_repository import FileStorylineRepository
 from infrastructure.persistence.repositories.file_plot_arc_repository import FilePlotArcRepository
+from infrastructure.persistence.repositories.file_foreshadowing_repository import FileForeshadowingRepository
 from infrastructure.ai.providers.anthropic_provider import AnthropicProvider
 from infrastructure.ai.config.settings import Settings
 
@@ -30,6 +31,8 @@ from application.services.knowledge_service import KnowledgeService
 from application.services.chat_service import ChatService
 from application.services.context_builder import ContextBuilder
 from application.services.auto_bible_generator import AutoBibleGenerator
+from application.services.state_extractor import StateExtractor
+from application.services.state_updater import StateUpdater
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.services.hosted_write_service import HostedWriteService
 from domain.novel.services.consistency_checker import ConsistencyChecker
@@ -153,6 +156,15 @@ def get_plot_arc_repository() -> FilePlotArcRepository:
         FilePlotArcRepository 实例
     """
     return FilePlotArcRepository(get_storage())
+
+
+def get_foreshadowing_repository():
+    """获取 Foreshadowing 仓储
+
+    Returns:
+        FileForeshadowingRepository 实例
+    """
+    return FileForeshadowingRepository(get_storage())
 
 
 # Service 依赖
@@ -324,7 +336,9 @@ def get_auto_workflow() -> AutoNovelGenerationWorkflow:
         consistency_checker=get_consistency_checker(),
         storyline_manager=get_storyline_manager(),
         plot_arc_repository=get_plot_arc_repository(),
-        llm_service=llm_service
+        llm_service=llm_service,
+        state_extractor=get_state_extractor(),
+        state_updater=get_state_updater()
     )
 
 
@@ -340,4 +354,27 @@ def get_auto_bible_generator() -> AutoBibleGenerator:
     return AutoBibleGenerator(
         llm_service=llm_service,
         bible_service=get_bible_service()
+    )
+
+
+def get_state_extractor() -> StateExtractor:
+    """获取状态提取器
+
+    Returns:
+        StateExtractor 实例
+    """
+    settings = _anthropic_settings(require_key=True)
+    llm_service = AnthropicProvider(settings)
+    return StateExtractor(llm_service=llm_service)
+
+
+def get_state_updater() -> StateUpdater:
+    """获取状态更新器
+
+    Returns:
+        StateUpdater 实例
+    """
+    return StateUpdater(
+        bible_repository=get_bible_repository(),
+        foreshadowing_repository=get_foreshadowing_repository()
     )
