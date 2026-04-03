@@ -1,5 +1,5 @@
 """Novel API 路由"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from typing import List
 from pydantic import BaseModel, Field
 import logging
@@ -34,40 +34,20 @@ class UpdateStageRequest(BaseModel):
     stage: str = Field(..., description="小说阶段")
 
 
-# Routes
-@router.post("/", response_model=NovelDTO, status_code=201)
-async def create_novel(
-    request: CreateNovelRequest,
-    service: NovelService = Depends(get_novel_service),
-    bible_generator: AutoBibleGenerator = Depends(get_auto_bible_generator),
-    knowledge_generator: AutoKnowledgeGenerator = Depends(get_auto_knowledge_generator)
+async def _generate_bible_background(
+    novel_id: str,
+    title: str,
+    target_chapters: int,
+    bible_generator: AutoBibleGenerator,
+    knowledge_generator: AutoKnowledgeGenerator
 ):
-    """创建新小说并自动生成 Bible 和初始 Knowledge
-
-    Args:
-        request: 创建小说请求
-        service: Novel 服务
-        bible_generator: Bible 生成器
-        knowledge_generator: Knowledge 生成器
-
-    Returns:
-        创建的小说 DTO
-    """
-    # 创建小说实体
-    novel_dto = service.create_novel(
-        novel_id=request.novel_id,
-        title=request.title,
-        author=request.author,
-        target_chapters=request.target_chapters
-    )
-
-    # 同步生成 Bible（用户需要等待，确保 Bible 可用）
+    """后台任务：生成 Bible 和 Knowledge"""
     bible_summary = ""
     try:
         bible_data = await bible_generator.generate_and_save(
-            request.novel_id,
-            request.title,
-            request.target_chapters
+            novel_id,
+            title,
+            target_chapters
         )
         # 构建 Bible 摘要供 Knowledge 生成使用
         chars = bible_data.get("characters", [])
@@ -75,18 +55,46 @@ async def create_novel(
         char_desc = "、".join(f"{c['name']}（{c.get('role', '')}）" for c in chars[:5])
         loc_desc = "、".join(c['name'] for c in locs[:3])
         bible_summary = f"主要角色：{char_desc}。重要地点：{loc_desc}。文风：{bible_data.get('style', '')}。"
-    except Exception as e:
-        logger.error(f"Failed to generate Bible for {request.novel_id}: {e}")
 
-    # 生成初始 Knowledge（不阻塞，失败不影响小说创建）
-    try:
+        # 生成初始 Knowledge
         await knowledge_generator.generate_and_save(
-            request.novel_id,
-            request.title,
+            novel_id,
+            title,
             bible_summary
         )
+        logger.info(f"Bible and Knowledge generated successfully for {novel_id}")
     except Exception as e:
-        logger.error(f"Failed to generate Knowledge for {request.novel_id}: {e}")
+        logger.error(f"Failed to generate Bible/Knowledge for {novel_id}: {e}")
+
+
+# Routes
+@router.post("/", response_model=NovelDTO, status_code=201)
+async def create_novel(
+    request: CreateNovelRequest,
+    service: NovelService = Depends(get_novel_service)
+):
+    """创建新小说（不自动生成 Bible）
+
+    创建小说后，前端应该：
+    1. 调用 POST /bible/novels/{novel_id}/generate 触发 Bible 生成
+    2. 轮询 GET /bible/novels/{novel_id}/bible/status 检查生成状态
+    3. 引导用户确认 Bible
+    4. 用户手动触发规划（通过 POST /novels/{novel_id}/structure/plan 接口）
+
+    Args:
+        request: 创建小说请求
+        service: Novel 服务
+
+    Returns:
+        创建的小说 DTO
+    """
+    # 只创建小说实体，不生成 Bible
+    novel_dto = service.create_novel(
+        novel_id=request.novel_id,
+        title=request.title,
+        author=request.author,
+        target_chapters=request.target_chapters
+    )
 
     return novel_dto
 
