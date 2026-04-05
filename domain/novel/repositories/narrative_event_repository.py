@@ -1,5 +1,6 @@
 """Narrative Event Repository 抽象接口"""
 from abc import ABC, abstractmethod
+from typing import Optional
 
 
 class NarrativeEventRepository(ABC):
@@ -39,5 +40,36 @@ class NarrativeEventRepository(ABC):
 
         Returns:
             新创建的 event_id
+        """
+        pass
+
+    @abstractmethod
+    def get_event(self, novel_id: str, event_id: str) -> Optional[dict]:
+        """获取单个事件
+
+        Args:
+            novel_id: 小说 ID
+            event_id: 事件 ID
+
+        Returns:
+            事件字典，如果不存在返回 None
+        """
+        pass
+
+    @abstractmethod
+    def update_event(
+        self,
+        novel_id: str,
+        event_id: str,
+        event_summary: str,
+        tags: list[str]
+    ) -> None:
+        """更新事件
+
+        Args:
+            novel_id: 小说 ID
+            event_id: 事件 ID
+            event_summary: 新的事件摘要
+            tags: 新的标签列表
         """
         pass

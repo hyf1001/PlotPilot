@@ -548,3 +548,17 @@ def get_macro_refactor_proposal_service():
         logger.warning("No API key found, using MockProvider for macro refactor proposals")
 
     return MacroRefactorProposalService(llm_service)
+
+
+def get_mutation_applier():
+    """获取 Mutation 应用器
+
+    Returns:
+        MutationApplier 实例
+    """
+    from application.services.mutation_applier import MutationApplier
+    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+
+    narrative_event_repo = SqliteNarrativeEventRepository(get_database())
+    return MutationApplier(narrative_event_repo)
+

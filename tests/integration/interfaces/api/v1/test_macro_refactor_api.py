@@ -187,3 +187,96 @@ class TestMacroRefactorAPI:
 
         # 应该返回 422 验证错误
         assert response.status_code == 422
+
+    def test_apply_mutations(self, client, setup_test_data):
+        """测试：应用 mutations 到事件"""
+        novel_id = setup_test_data
+
+        # 获取第一个事件
+        from infrastructure.persistence.database.connection import get_database
+        from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+
+        db = get_database()
+        repo = SqliteNarrativeEventRepository(db)
+        events = repo.list_up_to_chapter(novel_id, 1)
+        assert len(events) > 0
+        event_id = events[0]["event_id"]
+
+        # 构建 mutations 请求
+        request_data = {
+            "event_id": event_id,
+            "mutations": [
+                {"type": "add_tag", "tag": "性格:冷酷"},
+                {"type": "remove_tag", "tag": "动机:冲动"},
+                {"type": "replace_summary", "new_summary": "主角冷静地拒绝帮助"}
+            ],
+            "reason": "修正人设冲突"
+        }
+
+        # 发送请求
+        response = client.post(
+            f"/api/v1/novels/{novel_id}/macro-refactor/apply",
+            json=request_data
+        )
+
+        # 验证响应
+        assert response.status_code == 200
+        result = response.json()
+
+        # 验证响应结构
+        assert result["success"] is True
+        assert "updated_event" in result
+        assert "applied_mutations" in result
+
+        # 验证更新后的事件
+        updated_event = result["updated_event"]
+        assert updated_event["event_summary"] == "主角冷静地拒绝帮助"
+        assert "性格:冷酷" in updated_event["tags"]
+        assert "动机:冲动" not in updated_event["tags"]
+
+        # 验证应用的 mutations
+        assert len(result["applied_mutations"]) == 3
+
+        # 验证数据库中的事件已更新
+        updated_from_db = repo.get_event(novel_id, event_id)
+        assert updated_from_db["event_summary"] == "主角冷静地拒绝帮助"
+        assert "性格:冷酷" in updated_from_db["tags"]
+
+    def test_apply_mutations_validation(self, client):
+        """测试：验证 mutations 请求参数"""
+        novel_id = "test-novel"
+
+        # 缺少必需字段
+        invalid_request = {
+            "event_id": "evt_001"
+            # 缺少 mutations 字段
+        }
+
+        # 发送请求
+        response = client.post(
+            f"/api/v1/novels/{novel_id}/macro-refactor/apply",
+            json=invalid_request
+        )
+
+        # 应该返回 422 验证错误
+        assert response.status_code == 422
+
+    def test_apply_mutations_event_not_found(self, client, setup_test_data):
+        """测试：事件不存在时返回 400"""
+        novel_id = setup_test_data
+
+        # 使用不存在的 event_id
+        request_data = {
+            "event_id": "nonexistent-event-id",
+            "mutations": [{"type": "add_tag", "tag": "测试"}]
+        }
+
+        # 发送请求
+        response = client.post(
+            f"/api/v1/novels/{novel_id}/macro-refactor/apply",
+            json=request_data
+        )
+
+        # 应该返回 400 错误
+        assert response.status_code == 400
+

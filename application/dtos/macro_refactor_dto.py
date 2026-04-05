@@ -35,3 +35,19 @@ class RefactorProposal:
     suggested_mutations: List[Dict[str, Any]]  # 建议的 mutations
     suggested_tags: List[str]  # 建议的新标签
     reasoning: str  # 推理过程
+
+
+@dataclass
+class ApplyMutationRequest:
+    """应用 Mutation 请求"""
+    event_id: str
+    mutations: List[Dict[str, Any]]  # mutation 列表
+    reason: Optional[str] = None  # 修改原因
+
+
+@dataclass
+class ApplyMutationResponse:
+    """应用 Mutation 响应"""
+    success: bool
+    updated_event: Dict[str, Any]  # 更新后的事件
+    applied_mutations: List[Dict[str, Any]]  # 已应用的 mutations

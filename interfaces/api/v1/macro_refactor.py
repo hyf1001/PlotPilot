@@ -5,12 +5,15 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from application.services.macro_refactor_scanner import MacroRefactorScanner
 from application.services.macro_refactor_proposal_service import MacroRefactorProposalService
+from application.services.mutation_applier import MutationApplier
 from application.dtos.macro_refactor_dto import (
     LogicBreakpoint,
     RefactorProposalRequest,
-    RefactorProposal
+    RefactorProposal,
+    ApplyMutationRequest,
+    ApplyMutationResponse
 )
-from interfaces.api.dependencies import get_macro_refactor_scanner, get_macro_refactor_proposal_service
+from interfaces.api.dependencies import get_macro_refactor_scanner, get_macro_refactor_proposal_service, get_mutation_applier
 
 logger = logging.getLogger(__name__)
 
@@ -99,3 +102,55 @@ async def generate_proposal(
     except Exception as e:
         logger.error(f"Error generating proposal: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/{novel_id}/macro-refactor/apply", response_model=ApplyMutationResponse)
+async def apply_mutations(
+    novel_id: str,
+    request: ApplyMutationRequest = Body(...),
+    mutation_applier: MutationApplier = Depends(get_mutation_applier)
+) -> ApplyMutationResponse:
+    """
+    Apply mutations to a narrative event.
+
+    This endpoint applies a list of mutations (add_tag, remove_tag, replace_summary)
+    to a specific narrative event, updating it atomically.
+
+    Args:
+        novel_id: The novel ID
+        request: Apply mutation request with event_id, mutations, and optional reason
+        mutation_applier: Injected mutation applier service
+
+    Returns:
+        ApplyMutationResponse with success status, updated event, and applied mutations
+
+    Raises:
+        HTTPException: 400 if event not found, 500 if internal error occurs
+    """
+    try:
+        # Apply mutations
+        result = mutation_applier.apply_mutations(
+            novel_id=novel_id,
+            event_id=request.event_id,
+            mutations=request.mutations,
+            reason=request.reason
+        )
+
+        logger.info(
+            f"Applied {len(result['applied_mutations'])} mutations to event {request.event_id} "
+            f"in novel {novel_id}"
+        )
+
+        return ApplyMutationResponse(
+            success=result["success"],
+            updated_event=result["updated_event"],
+            applied_mutations=result["applied_mutations"]
+        )
+
+    except ValueError as e:
+        logger.warning(f"Event not found: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error applying mutations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
