@@ -87,4 +87,11 @@ export const chapterApi = {
    */
   getChapterStructure: (novelId: string, chapterNumber: number) =>
     apiClient.get<ChapterStructureDTO>(`/novels/${novelId}/chapters/${chapterNumber}/structure`) as Promise<ChapterStructureDTO>,
+
+  /**
+   * 确保章节在正文库中存在；若不存在则创建空白记录
+   * POST /api/v1/novels/{novelId}/chapters/{chapterNumber}/ensure
+   */
+  ensureChapter: (novelId: string, chapterNumber: number, title = '') =>
+    apiClient.post<ChapterDTO>(`/novels/${novelId}/chapters/${chapterNumber}/ensure`, { title }) as Promise<ChapterDTO>,
 }

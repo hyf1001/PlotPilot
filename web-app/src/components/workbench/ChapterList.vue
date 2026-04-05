@@ -28,7 +28,7 @@
             v-for="ch in chapters"
             :key="ch.id"
             :class="{ 'is-active': currentChapterId === ch.id }"
-            @click="handleChapterClick(ch.id)"
+            @click="handleChapterClick(ch.id, ch.title)"
           >
             <n-thing :title="`第${ch.number}章`">
               <template #description>
@@ -83,7 +83,7 @@ const props = withDefaults(defineProps<ChapterListProps>(), {
 })
 
 const emit = defineEmits<{
-  select: [id: number]
+  select: [id: number, title: string]
   back: []
   refresh: []
   planAct: [actId: string, actTitle: string]
@@ -110,8 +110,8 @@ function refreshStoryTree() {
 
 defineExpose({ refreshStoryTree })
 
-const handleChapterClick = (id: number) => {
-  emit('select', id)
+const handleChapterClick = (id: number, title = '') => {
+  emit('select', id, title)
 }
 
 const handleBack = () => {

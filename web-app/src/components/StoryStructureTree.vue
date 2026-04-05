@@ -71,6 +71,7 @@ import { ref, computed, h, onMounted, watch } from 'vue'
 import { NTree, NEmpty, NSpin, NTag, NButton, NDropdown, NModal, NInput, useMessage, useDialog } from 'naive-ui'
 import { structureApi, type StoryNode } from '@/api/structure'
 import { workflowApi } from '@/api/workflow'
+import { chapterApi } from '@/api/chapter'
 
 const props = defineProps<{
   slug: string
@@ -78,7 +79,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  selectChapter: [id: number]
+  selectChapter: [id: number, title: string]
   planAct: [actId: string, actTitle: string]
 }>()
 
@@ -138,13 +139,33 @@ const menuOptions = computed(() => {
   return items
 })
 
-watch(() => props.currentChapterId, (chapterId) => {
-  if (chapterId) {
-    selectedKeys.value = [`chapter-${props.slug}-chapter-${chapterId}`]
-  } else {
-    selectedKeys.value = []
+/** 在结构树中按章节号查找节点 id（兼容 chapter-{slug}-{n} 与 chapter-{slug}-chapter-{n} 等后端约定） */
+function findChapterNodeId(nodes: StoryNode[], chapterNum: number): string | null {
+  for (const node of nodes) {
+    if (node.node_type === 'chapter' && node.number === chapterNum) {
+      return node.id
+    }
+    if (node.children?.length) {
+      const found = findChapterNodeId(node.children, chapterNum)
+      if (found) return found
+    }
   }
-}, { immediate: true })
+  return null
+}
+
+watch(
+  [() => props.currentChapterId, treeData],
+  () => {
+    const chapterId = props.currentChapterId
+    if (chapterId == null || chapterId < 1) {
+      selectedKeys.value = []
+      return
+    }
+    const key = findChapterNodeId(treeData.value, chapterId)
+    selectedKeys.value = key ? [key] : []
+  },
+  { immediate: true, deep: true }
+)
 
 const convertToTreeNode = (node: StoryNode): any => {
   const iconMap: Record<string, string> = {
@@ -204,6 +225,21 @@ const initializeStructure = async () => {
   })
 }
 
+/** 从结构树章节节点解析「全书章节号」（与 GET .../chapters/{chapter_number} 一致） */
+function resolveBookChapterNumber(node: StoryNode): number | null {
+  if (node.node_type !== 'chapter') return null
+  const id = node.id
+  const mGlobal = id.match(/-chapter-(\d+)$/)
+  if (mGlobal) return parseInt(mGlobal[1], 10)
+  const mEnd = id.match(/chapter-(\d+)$/)
+  if (mEnd) return parseInt(mEnd[1], 10)
+  const n = node.number
+  if (typeof n === 'number' && n >= 1) return n
+  const mTail = id.match(/-(\d+)$/)
+  if (mTail) return parseInt(mTail[1], 10)
+  return null
+}
+
 const handleSelect = (keys: string[]) => {
   if (!keys.length) return
   const findNode = (nodes: StoryNode[], id: string): StoryNode | null => {
@@ -217,9 +253,9 @@ const handleSelect = (keys: string[]) => {
     return null
   }
   const node = findNode(treeData.value, keys[0])
-  if (node?.node_type === 'chapter') {
-    const match = node.id.match(/chapter-(\d+)$/)
-    if (match) emit('selectChapter', parseInt(match[1]))
+  const num = node ? resolveBookChapterNumber(node) : null
+  if (num != null) {
+    emit('selectChapter', num, node?.title ?? '')
   }
 }
 
@@ -292,11 +328,20 @@ const doAddChild = async () => {
   const childType = childTypeMap[node.node_type]
   if (!childType) return
   try {
+    let number = 1
+    if (childType === 'chapter') {
+      try {
+        const existingChapters = await chapterApi.listChapters(props.slug)
+        number = existingChapters.length + 1
+      } catch {
+        // 若查询失败则退回 number=1，后端 ensure 时会按章节号创建
+      }
+    }
     await structureApi.createNode(props.slug, {
       node_type: childType as any,
       parent_id: node.id,
       title: addChildValue.value.trim(),
-      number: 1,
+      number,
     })
     message.success('已添加')
     await loadTree()
