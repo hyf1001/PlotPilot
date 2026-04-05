@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Core module
-from interfaces.api.v1.core import novels, chapters, scene_generation_routes, stats
+from interfaces.api.v1.core import novels, chapters, scene_generation_routes
 
 # World module
 from interfaces.api.v1.world import bible, cast, knowledge, knowledge_graph_routes, worldbuilding_routes
@@ -42,9 +42,9 @@ from interfaces.api.v1.analyst import voice, narrative_state, foreshadow_ledger
 
 # Workbench module
 from interfaces.api.v1.workbench import sandbox, writer_block
-from web.routers.stats import create_stats_router
-from web.services.stats_service import StatsService
-from web.repositories.sqlite_stats_repository_adapter import SqliteStatsRepositoryAdapter
+from interfaces.api.stats.routers.stats import create_stats_router
+from interfaces.api.stats.services.stats_service import StatsService
+from interfaces.api.stats.repositories.sqlite_stats_repository_adapter import SqliteStatsRepositoryAdapter
 from infrastructure.persistence.database.connection import get_database
 from application.paths import DATA_DIR
 
