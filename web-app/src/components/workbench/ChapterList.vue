@@ -47,9 +47,11 @@
       <!-- 树形视图：显示完整叙事结构（部-卷-幕-章） -->
       <div v-else-if="viewMode === 'tree'">
         <StoryStructureTree
+          ref="storyTreeRef"
           :slug="slug"
           :current-chapter-id="currentChapterId"
           @select-chapter="handleChapterClick"
+          @plan-act="(id, title) => emit('planAct', id, title)"
         />
       </div>
     </n-scrollbar>
@@ -57,7 +59,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, type ComponentPublicInstance } from 'vue'
 import { useMessage, useDialog } from 'naive-ui'
 import { workflowApi } from '@/api/workflow'
 import StoryStructureTree from '@/components/StoryStructureTree.vue'
@@ -84,6 +86,7 @@ const emit = defineEmits<{
   select: [id: number]
   back: []
   refresh: []
+  planAct: [actId: string, actTitle: string]
 }>()
 
 const message = useMessage()
@@ -97,6 +100,15 @@ const viewModeOptions = [
 
 const planning = ref(false)
 const extending = ref(false)
+
+const storyTreeRef = ref<ComponentPublicInstance<{ loadTree: () => Promise<void> }> | null>(null)
+
+/** 幕→章确认后由工作台调用，刷新左侧叙事结构树 */
+function refreshStoryTree() {
+  void storyTreeRef.value?.loadTree?.()
+}
+
+defineExpose({ refreshStoryTree })
 
 const handleChapterClick = (id: number) => {
   emit('select', id)

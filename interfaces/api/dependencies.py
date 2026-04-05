@@ -26,7 +26,7 @@ from infrastructure.persistence.database.sqlite_voice_fingerprint_repository imp
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.repositories.file_cast_repository import FileCastRepository
 from infrastructure.persistence.repositories.file_knowledge_repository import FileKnowledgeRepository
-from infrastructure.persistence.repositories.file_foreshadowing_repository import FileForeshadowingRepository
+from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
 from infrastructure.ai.providers.anthropic_provider import AnthropicProvider
 from infrastructure.ai.config.settings import Settings
 
@@ -150,13 +150,9 @@ def get_plot_arc_repository() -> SqlitePlotArcRepository:
     return SqlitePlotArcRepository(get_database())
 
 
-def get_foreshadowing_repository():
-    """获取 Foreshadowing 仓储
-
-    Returns:
-        FileForeshadowingRepository 实例
-    """
-    return FileForeshadowingRepository(get_storage())
+def get_foreshadowing_repository() -> SqliteForeshadowingRepository:
+    """伏笔与潜台词账本仓储（SQLite，与 novels 同库；不再使用 foreshadowings/*.json）。"""
+    return SqliteForeshadowingRepository(get_database())
 
 
 def get_story_node_repository() -> StoryNodeRepository:

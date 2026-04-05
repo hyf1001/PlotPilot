@@ -7,12 +7,14 @@
         <n-split direction="horizontal" :min="0.12" :max="0.30" :default-size="0.18">
           <template #1>
             <ChapterList
+              ref="chapterListRef"
               :slug="slug"
               :chapters="chapters"
               :current-chapter-id="currentChapterId"
               @select="handleChapterSelect"
               @back="goHome"
               @refresh="handleChapterUpdated"
+              @plan-act="handlePlanAct"
             />
           </template>
 
@@ -44,11 +46,19 @@
         </n-split>
       </div>
     </n-spin>
+
+    <!-- 幕→章 AI 规划弹层 -->
+    <ActPlanningModal
+      v-model:show="showActPlanning"
+      :act-id="actPlanningId"
+      :act-title="actPlanningTitle"
+      @confirmed="handleChapterUpdated"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, ref, type ComponentPublicInstance } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useWorkbench } from '../composables/useWorkbench'
@@ -56,15 +66,30 @@ import StatsTopBar from '../components/stats/StatsTopBar.vue'
 import ChapterList from '../components/workbench/ChapterList.vue'
 import WorkArea from '../components/workbench/WorkArea.vue'
 import SettingsPanel from '../components/workbench/SettingsPanel.vue'
+import ActPlanningModal from '../components/workbench/ActPlanningModal.vue'
 
 const route = useRoute()
 const message = useMessage()
 
 const slug = route.params.slug as string
 
+const chapterListRef = ref<ComponentPublicInstance<{ refreshStoryTree: () => void }> | null>(null)
+
 const handleChapterUpdated = async () => {
   await loadDesk()
   biblePanelKey.value += 1
+  chapterListRef.value?.refreshStoryTree?.()
+}
+
+// 幕→章 规划弹层
+const showActPlanning = ref(false)
+const actPlanningId = ref('')
+const actPlanningTitle = ref('')
+
+const handlePlanAct = (actId: string, actTitle: string) => {
+  actPlanningId.value = actId
+  actPlanningTitle.value = actTitle
+  showActPlanning.value = true
 }
 
 const {

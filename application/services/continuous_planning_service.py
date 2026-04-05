@@ -11,6 +11,10 @@ from datetime import datetime
 
 from domain.structure.story_node import StoryNode, NodeType, PlanningStatus, PlanningSource
 from domain.structure.chapter_element import ChapterElement, ElementType, RelationType, Importance
+from domain.novel.entities.chapter import Chapter, ChapterStatus
+from domain.novel.value_objects.novel_id import NovelId
+from domain.novel.value_objects.chapter_id import ChapterId
+from domain.novel.repositories.chapter_repository import ChapterRepository
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
 from domain.ai.services.llm_service import LLMService, GenerationConfig
@@ -33,12 +37,14 @@ class ContinuousPlanningService:
         story_node_repo: StoryNodeRepository,
         chapter_element_repo: ChapterElementRepository,
         llm_service: LLMService,
-        bible_service=None
+        bible_service=None,
+        chapter_repository: Optional[ChapterRepository] = None,
     ):
         self.story_node_repo = story_node_repo
         self.chapter_element_repo = chapter_element_repo
         self.llm_service = llm_service
         self.bible_service = bible_service
+        self.chapter_repository = chapter_repository
 
     # ==================== 宏观规划 ====================
 
@@ -153,52 +159,92 @@ class ContinuousPlanningService:
             "chapters": plan.get("chapters", [])
         }
 
+    async def _remove_chapter_children_of_act(self, act_id: str) -> None:
+        """同一幕再次确认规划时，先删掉本幕下已有章节节点及对应正文行、元素关联，避免重复堆积。"""
+        children = self.story_node_repo.get_children_sync(act_id)
+        chapter_nodes = [n for n in children if n.node_type == NodeType.CHAPTER]
+        for n in chapter_nodes:
+            await self.chapter_element_repo.delete_by_chapter(n.id)
+            if self.chapter_repository:
+                self.chapter_repository.delete(ChapterId(n.id))
+            await self.story_node_repo.delete(n.id)
+
     async def confirm_act_planning(self, act_id: str, chapters: List[Dict]) -> Dict:
-        """确认幕级规划"""
+        """确认幕级规划：写入 story_nodes + chapters 表（供工作台侧栏列表），并关联 Bible 元素。"""
         logger.info(f"Confirming act planning for act {act_id}")
 
         act_node = await self.story_node_repo.get_by_id(act_id)
         if not act_node:
             raise ValueError(f"幕节点不存在: {act_id}")
 
-        created_chapters = []
-        created_elements = []
+        await self._remove_chapter_children_of_act(act_id)
 
-        for idx, chapter_data in enumerate(chapters):
-            chapter_id = f"chapter-{uuid.uuid4().hex[:8]}"
+        novel_id_vo = NovelId(act_node.novel_id)
+        existing_book = []
+        if self.chapter_repository:
+            existing_book = self.chapter_repository.list_by_novel(novel_id_vo)
+        max_num = max((c.number for c in existing_book), default=0)
+        next_global_number = max_num + 1
+
+        created_chapters: List[StoryNode] = []
+        created_elements: List[ChapterElement] = []
+
+        for idx, raw in enumerate(chapters):
+            row = self._normalize_act_chapter_row(raw, act_local_index=idx + 1)
+            global_number = next_global_number + idx
+            # 与 novel_service.add_chapter / 前端树选择一致：id 以 chapter-{全局章号} 结尾
+            story_chapter_id = f"chapter-{act_node.novel_id}-chapter-{global_number}"
 
             chapter_node = StoryNode(
-                id=chapter_id,
+                id=story_chapter_id,
                 novel_id=act_node.novel_id,
                 parent_id=act_id,
                 node_type=NodeType.CHAPTER,
-                number=chapter_data["number"],
-                title=chapter_data["title"],
+                number=global_number,
+                title=row["title"],
                 order_index=act_node.order_index + 1 + idx,
                 planning_status=PlanningStatus.CONFIRMED,
                 planning_source=PlanningSource.AI_ACT,
-                outline=chapter_data.get("outline"),
-                pov_character_id=chapter_data.get("pov_character_id"),
+                outline=row.get("outline"),
+                pov_character_id=row.get("pov_character_id"),
             )
             created_chapters.append(chapter_node)
 
-            # 创建元素关联
-            elements = self._create_elements_from_data(
-                chapter_id, chapter_data.get("elements", {})
-            )
+            elements_dict = self._merged_elements_dict(row)
+            elements = self._create_elements_from_data(story_chapter_id, elements_dict)
             created_elements.extend(elements)
+
+            if self.chapter_repository:
+                book_ch = Chapter(
+                    id=story_chapter_id,
+                    novel_id=novel_id_vo,
+                    number=global_number,
+                    title=row["title"],
+                    content="",
+                    status=ChapterStatus.DRAFT,
+                )
+                self.chapter_repository.save(book_ch)
 
         await self.story_node_repo.save_batch(created_chapters)
         await self.chapter_element_repo.save_batch(created_elements)
 
-        act_node.chapter_count = len(created_chapters)
+        act_children = self.story_node_repo.get_children_sync(act_id)
+        chapter_nodes = [n for n in act_children if n.node_type == NodeType.CHAPTER]
+        if chapter_nodes:
+            nums = [n.number for n in chapter_nodes]
+            act_node.chapter_start = min(nums)
+            act_node.chapter_end = max(nums)
+        else:
+            act_node.chapter_start = None
+            act_node.chapter_end = None
+        act_node.chapter_count = len(chapter_nodes)
         await self.story_node_repo.update(act_node)
 
         return {
             "success": True,
             "created_chapters": len(created_chapters),
             "created_elements": len(created_elements),
-            "message": f"已创建 {len(created_chapters)} 个章节"
+            "message": f"已写入 {len(created_chapters)} 个章节（本幕旧规划已替换）",
         }
 
     # ==================== AI 续规划 ====================
@@ -326,26 +372,68 @@ class ContinuousPlanningService:
             conflicts=data.get("conflicts", []) if node_type == NodeType.ACT else [],
         )
 
+    def _normalize_act_chapter_row(self, raw: Dict, act_local_index: int) -> Dict:
+        """LLM / 前端可能缺 number、title，或 number 为字符串；统一为可落库结构。"""
+        title = (raw.get("title") or "").strip() or f"第{act_local_index}章"
+        num = raw.get("number")
+        try:
+            num_int = int(num) if num is not None else act_local_index
+        except (TypeError, ValueError):
+            num_int = act_local_index
+        outline = raw.get("outline") or raw.get("description") or ""
+        if isinstance(outline, str):
+            outline = outline.strip() or None
+        else:
+            outline = None
+        return {
+            **raw,
+            "number": num_int,
+            "title": title,
+            "outline": outline,
+        }
+
+    def _merged_elements_dict(self, chapter_row: Dict) -> Dict:
+        """提示词里人物/地点在 chapters[].characters；落库时期望 elements.characters 为带 id 的对象列表。"""
+        merged: Dict = {}
+        inner = chapter_row.get("elements")
+        if isinstance(inner, dict):
+            merged.update(inner)
+        for key in ("characters", "locations"):
+            top = chapter_row.get(key)
+            if top and not merged.get(key):
+                merged[key] = top
+        return merged
+
     def _create_elements_from_data(self, chapter_id: str, elements_data: Dict) -> List[ChapterElement]:
         """从数据创建章节元素"""
         elements = []
+        if not isinstance(elements_data, dict):
+            return elements
 
         for char_data in elements_data.get("characters", []):
+            if isinstance(char_data, str):
+                char_data = {"id": char_data}
+            if not isinstance(char_data, dict) or not char_data.get("id"):
+                continue
             elements.append(ChapterElement(
                 id=f"elem-{uuid.uuid4().hex[:8]}",
                 chapter_id=chapter_id,
                 element_type=ElementType.CHARACTER,
-                element_id=char_data["id"],
+                element_id=str(char_data["id"]),
                 relation_type=RelationType(char_data.get("relation", "appears")),
                 importance=Importance(char_data.get("importance", "normal")),
             ))
 
         for loc_data in elements_data.get("locations", []):
+            if isinstance(loc_data, str):
+                loc_data = {"id": loc_data}
+            if not isinstance(loc_data, dict) or not loc_data.get("id"):
+                continue
             elements.append(ChapterElement(
                 id=f"elem-{uuid.uuid4().hex[:8]}",
                 chapter_id=chapter_id,
                 element_type=ElementType.LOCATION,
-                element_id=loc_data["id"],
+                element_id=str(loc_data["id"]),
                 relation_type=RelationType.SCENE,
                 importance=Importance.NORMAL,
             ))

@@ -11,8 +11,10 @@ from typing import List, Optional, Dict
 from application.services.continuous_planning_service import ContinuousPlanningService
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+from infrastructure.persistence.database.sqlite_chapter_repository import SqliteChapterRepository
 from domain.ai.services.llm_service import LLMService
 from application.paths import get_db_path
+from interfaces.api.dependencies import get_database
 
 
 router = APIRouter(prefix="/api/v1/planning", tags=["continuous-planning"])
@@ -87,7 +89,8 @@ def get_service() -> ContinuousPlanningService:
         story_node_repo,
         chapter_element_repo,
         llm_service,
-        bible_service
+        bible_service,
+        chapter_repository=SqliteChapterRepository(get_database()),
     )
 
 

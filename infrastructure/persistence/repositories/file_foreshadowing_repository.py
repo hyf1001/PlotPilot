@@ -1,4 +1,8 @@
-"""基于文件的 ForeshadowingRegistry 仓储实现"""
+"""[已弃用] 基于文件的 ForeshadowingRegistry 仓储。
+
+生产路径请使用 :class:`infrastructure.persistence.database.sqlite_foreshadowing_repository.SqliteForeshadowingRepository`。
+保留本模块仅供一次性从 JSON 迁移或本地脚本导入。
+"""
 import logging
 from typing import Optional
 from domain.novel.entities.foreshadowing_registry import ForeshadowingRegistry

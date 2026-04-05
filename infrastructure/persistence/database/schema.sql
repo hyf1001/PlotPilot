@@ -423,3 +423,11 @@ CREATE TABLE IF NOT EXISTS voice_fingerprint (
 );
 
 CREATE INDEX IF NOT EXISTS idx_voice_fingerprint_novel ON voice_fingerprint(novel_id);
+
+-- ========== 伏笔注册表 + 潜台词账本（单库 JSON 快照，替代文件 foreshadowings/*.json）==========
+CREATE TABLE IF NOT EXISTS novel_foreshadow_registry (
+    novel_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);

@@ -11,8 +11,13 @@ from infrastructure.persistence.database.sqlite_narrative_event_repository impor
     SqliteNarrativeEventRepository
 )
 
+# pathlib: parents[0]==parent；v1/conftest.py → 仓库根为 parents[5]
 SCHEMA_PATH = (
-    Path(__file__).resolve().parents[6] / "infrastructure" / "persistence" / "database" / "schema.sql"
+    Path(__file__).resolve().parents[5]
+    / "infrastructure"
+    / "persistence"
+    / "database"
+    / "schema.sql"
 )
 
 
@@ -36,7 +41,12 @@ def client(db, monkeypatch):
 
     monkeypatch.setattr(
         "infrastructure.persistence.database.connection.get_database",
-        mock_get_database
+        mock_get_database,
+    )
+    # dependencies 内 `from connection import get_database` 会绑定旧引用，需同步 patch
+    monkeypatch.setattr(
+        "interfaces.api.dependencies.get_database",
+        mock_get_database,
     )
 
     # Import app after monkeypatching

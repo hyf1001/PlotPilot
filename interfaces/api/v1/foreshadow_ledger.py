@@ -5,10 +5,10 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from application.services.subtext_matching_service import SubtextMatchingService
-from infrastructure.persistence.repositories.file_foreshadowing_repository import FileForeshadowingRepository
+from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
 from domain.novel.entities.subtext_ledger_entry import SubtextLedgerEntry
 from domain.novel.value_objects.novel_id import NovelId
-from domain.shared.exceptions import EntityNotFoundError, InvalidOperationError
+from domain.shared.exceptions import InvalidOperationError
 from interfaces.api.dependencies import get_foreshadowing_repository
 
 
@@ -77,7 +77,7 @@ def _entry_to_response(entry: SubtextLedgerEntry) -> SubtextEntryResponse:
 def create_subtext_entry(
     novel_id: str = Path(..., description="小说 ID"),
     request: CreateSubtextEntryRequest = ...,
-    repo: FileForeshadowingRepository = Depends(get_foreshadowing_repository)
+    repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
     """创建潜台词账本条目"""
     try:
@@ -112,7 +112,7 @@ def create_subtext_entry(
 def list_subtext_entries(
     novel_id: str = Path(..., description="小说 ID"),
     status: Optional[str] = None,
-    repo: FileForeshadowingRepository = Depends(get_foreshadowing_repository)
+    repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
     """列出所有潜台词账本条目"""
     try:
@@ -136,7 +136,7 @@ def list_subtext_entries(
 def get_subtext_entry(
     novel_id: str = Path(..., description="小说 ID"),
     entry_id: str = Path(..., description="条目 ID"),
-    repo: FileForeshadowingRepository = Depends(get_foreshadowing_repository)
+    repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
     """获取单个潜台词账本条目"""
     registry = repo.get_by_novel_id(NovelId(novel_id))
@@ -155,7 +155,7 @@ def update_subtext_entry(
     novel_id: str = Path(..., description="小说 ID"),
     entry_id: str = Path(..., description="条目 ID"),
     request: UpdateSubtextEntryRequest = ...,
-    repo: FileForeshadowingRepository = Depends(get_foreshadowing_repository)
+    repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
     """更新潜台词账本条目"""
     try:
@@ -195,7 +195,7 @@ def update_subtext_entry(
 def delete_subtext_entry(
     novel_id: str = Path(..., description="小说 ID"),
     entry_id: str = Path(..., description="条目 ID"),
-    repo: FileForeshadowingRepository = Depends(get_foreshadowing_repository)
+    repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
     """删除潜台词账本条目"""
     try:
@@ -214,7 +214,7 @@ def delete_subtext_entry(
 def match_subtext_entry(
     novel_id: str = Path(..., description="小说 ID"),
     request: MatchSubtextRequest = ...,
-    repo: FileForeshadowingRepository = Depends(get_foreshadowing_repository)
+    repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
     """查找匹配的潜台词账本条目"""
     try:

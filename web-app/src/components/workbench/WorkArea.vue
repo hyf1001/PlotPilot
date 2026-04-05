@@ -248,7 +248,11 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { useMessage } from 'naive-ui'
-import { workflowApi, consumeHostedWriteStream } from '../../api/workflow'
+import {
+  workflowApi,
+  consumeGenerateChapterStream,
+  consumeHostedWriteStream,
+} from '../../api/workflow'
 import { chapterApi } from '../../api/chapter'
 
 interface Chapter {
@@ -364,7 +368,7 @@ const handleStartGenerate = async () => {
   generatedContent.value = ''
 
   try {
-    await workflowApi.consumeGenerateChapterStream(
+    await consumeGenerateChapterStream(
       props.slug,
       {
         chapter_number: currentChapter.value.number,
