@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from interfaces.api.v1 import novels, chapters, bible, cast, knowledge, generation, story_structure
 from interfaces.api.v1 import chapter_element_routes, knowledge_graph_routes, continuous_planning_routes
-from interfaces.api.v1 import worldbuilding_routes, context_intelligence, narrative_state, foreshadow_ledger, voice, macro_refactor
+from interfaces.api.v1 import worldbuilding_routes, context_intelligence, narrative_state, foreshadow_ledger, voice, macro_refactor, writer_block
 from web.routers.stats import create_stats_router
 from web.services.stats_service import StatsService
 from web.repositories.sqlite_stats_repository_adapter import SqliteStatsRepositoryAdapter
@@ -69,6 +69,7 @@ app.include_router(narrative_state.router, prefix="/api/v1")
 app.include_router(foreshadow_ledger.router, prefix="/api/v1")
 app.include_router(voice.router, prefix="/api/v1")
 app.include_router(macro_refactor.router, prefix="/api/v1")
+app.include_router(writer_block.router, prefix="/api/v1")
 
 # 注册统一的持续规划路由
 app.include_router(continuous_planning_routes.router)

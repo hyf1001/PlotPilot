@@ -562,3 +562,27 @@ def get_mutation_applier():
     narrative_event_repo = SqliteNarrativeEventRepository(get_database())
     return MutationApplier(narrative_event_repo)
 
+
+def get_tension_analyzer():
+    """获取张力分析器
+
+    Returns:
+        TensionAnalyzer 实例
+    """
+    from application.services.tension_analyzer import TensionAnalyzer
+    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
+    from infrastructure.ai.llm_client import LLMClient
+
+    settings = _anthropic_settings(require_key=False)
+    if settings:
+        llm_provider = AnthropicProvider(settings)
+        logger.info("Using AnthropicProvider for tension analyzer")
+    else:
+        from infrastructure.ai.providers.mock_provider import MockProvider
+        llm_provider = MockProvider()
+        logger.warning("No API key found, using MockProvider for tension analyzer")
+
+    llm_client = LLMClient(provider=llm_provider)
+    narrative_event_repo = SqliteNarrativeEventRepository(get_database())
+    return TensionAnalyzer(narrative_event_repo, llm_client)
+
