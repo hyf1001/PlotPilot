@@ -22,6 +22,7 @@ from infrastructure.persistence.database.chapter_element_repository import Chapt
 from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
 from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
 from infrastructure.persistence.database.sqlite_plot_arc_repository import SqlitePlotArcRepository
+from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
 
 from application.engine.services.autopilot_daemon import AutopilotDaemon
 from application.engine.services.background_task_service import BackgroundTaskService
@@ -102,6 +103,7 @@ def build_daemon() -> AutopilotDaemon:
         storyline_repository=SqliteStorylineRepository(get_database()),
         chapter_repository=get_chapter_repository(),
         plot_arc_repository=SqlitePlotArcRepository(get_database()),
+        narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
     )
 
     aftermath_pipeline = None
@@ -116,6 +118,7 @@ def build_daemon() -> AutopilotDaemon:
             storyline_repository=SqliteStorylineRepository(get_database()),
             chapter_repository=get_chapter_repository(),
             plot_arc_repository=SqlitePlotArcRepository(get_database()),
+            narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
         )
         logger.info("ChapterAftermathPipeline 已注入（叙事/向量/文风/KG；三元组与伏笔、故事线、张力、对话、剧情点单次 LLM）")
     except Exception as e:

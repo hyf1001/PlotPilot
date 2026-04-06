@@ -60,6 +60,7 @@ class BackgroundTaskService:
         storyline_repository=None,
         chapter_repository=None,
         plot_arc_repository=None,
+        narrative_event_repository=None,
     ):
         self.voice_drift_service = voice_drift_service
         self.llm_service = llm_service
@@ -70,6 +71,7 @@ class BackgroundTaskService:
         self.storyline_repository = storyline_repository
         self.chapter_repository = chapter_repository
         self.plot_arc_repository = plot_arc_repository
+        self.narrative_event_repository = narrative_event_repository
 
         self._queue = queue.Queue(maxsize=200)  # 防队列无限增长
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="bg-task-worker")
@@ -165,6 +167,7 @@ class BackgroundTaskService:
                     storyline_repository=self.storyline_repository,
                     chapter_repository=self.chapter_repository,
                     plot_arc_repository=self.plot_arc_repository,
+                    narrative_event_repository=self.narrative_event_repository,
                 )
             )
         except RuntimeError as e:
@@ -185,6 +188,7 @@ class BackgroundTaskService:
                         storyline_repository=self.storyline_repository,
                         chapter_repository=self.chapter_repository,
                         plot_arc_repository=self.plot_arc_repository,
+                        narrative_event_repository=self.narrative_event_repository,
                     )
                 )
             finally:

@@ -218,6 +218,7 @@ def get_background_task_service():
     from application.engine.services.background_task_service import BackgroundTaskService
     from infrastructure.persistence.database.triple_repository import TripleRepository
     from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
+    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
     from infrastructure.persistence.database.connection import get_database
 
     return BackgroundTaskService(
@@ -230,6 +231,7 @@ def get_background_task_service():
         storyline_repository=SqliteStorylineRepository(get_database()),
         chapter_repository=get_chapter_repository(),
         plot_arc_repository=get_plot_arc_repository(),
+        narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
     )
 
 
@@ -238,6 +240,7 @@ def get_chapter_aftermath_pipeline():
     from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
     from infrastructure.persistence.database.triple_repository import TripleRepository
     from infrastructure.persistence.database.sqlite_storyline_repository import SqliteStorylineRepository
+    from infrastructure.persistence.database.sqlite_narrative_event_repository import SqliteNarrativeEventRepository
     from infrastructure.persistence.database.connection import get_database
 
     return ChapterAftermathPipeline(
@@ -250,6 +253,7 @@ def get_chapter_aftermath_pipeline():
         storyline_repository=SqliteStorylineRepository(get_database()),
         chapter_repository=get_chapter_repository(),
         plot_arc_repository=get_plot_arc_repository(),
+        narrative_event_repository=SqliteNarrativeEventRepository(get_database()),
     )
 
 

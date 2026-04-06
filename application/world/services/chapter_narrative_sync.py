@@ -482,15 +482,7 @@ def persist_bundle_extras(
     storyline_repository: Any = None,
     chapter_repository: Any = None,
     plot_arc_repository: Any = None,
-) -> None:
-    """将 bundle 中的故事线进展、张力值、对话写入表，并自动生成剧情点、推进里程碑、调整故事线范围。"""
-def persist_bundle_extras(
-    novel_id: str,
-    chapter_number: int,
-    bundle: dict,
-    storyline_repository: Any = None,
-    chapter_repository: Any = None,
-    plot_arc_repository: Any = None,
+    narrative_event_repository: Any = None,
 ) -> None:
     """将 bundle 中的故事线进展、张力值、对话写入表，并自动生成剧情点、推进里程碑、调整故事线范围。"""
     # 1. 张力值写入 chapters 表
@@ -551,13 +543,43 @@ def persist_bundle_extras(
     if storyline_repository and storyline_progress:
         _auto_adjust_storyline_range(novel_id, chapter_number, storyline_progress, storyline_repository)
 
-    # 6. 对话提取（写入 narrative_events 或单独的 dialogues 表）
+    # 6. 对话提取（写入 narrative_events 表）
     dialogues = bundle.get("dialogues") or []
-    if dialogues:
+    if narrative_event_repository and dialogues:
         try:
-            # TODO: 根据实际表结构落库，这里先记录日志
+            for dialogue in dialogues:
+                if not isinstance(dialogue, dict):
+                    continue
+                speaker = str(dialogue.get("speaker", "")).strip()
+                content = str(dialogue.get("content", "")).strip()
+                context = str(dialogue.get("context", "")).strip()
+
+                if not (speaker and content):
+                    continue
+
+                # 构建事件摘要
+                event_summary = f"{speaker}: {content[:100]}"
+                if len(content) > 100:
+                    event_summary += "..."
+
+                # 构建 mutations（对话不涉及实体变更，可为空）
+                mutations = []
+
+                # 构建 tags
+                tags = [f"对话:{speaker}"]
+                if context:
+                    tags.append(f"场景:{context}")
+
+                # 写入 narrative_events
+                narrative_event_repository.append_event(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    event_summary=event_summary,
+                    mutations=mutations,
+                    tags=tags
+                )
+
             logger.info("对话提取完成 novel=%s ch=%s count=%d", novel_id, chapter_number, len(dialogues))
-            # 可以写入 narrative_events 表，tag 为 "对白:角色名"
         except Exception as e:
             logger.warning("对话落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
 
@@ -574,6 +596,7 @@ async def sync_chapter_narrative_after_save(
     storyline_repository: Any = None,
     chapter_repository: Any = None,
     plot_arc_repository: Any = None,
+    narrative_event_repository: Any = None,
 ) -> None:
     """异步：一次 LLM 写 summary/事件/埋线 + 可选三元组与伏笔 + 故事线/张力/对话 → 节拍来自规划 → upsert knowledge → 向量索引。"""
     if not content or not str(content).strip():
@@ -638,7 +661,7 @@ async def sync_chapter_narrative_after_save(
                 "bundle 三元组/伏笔落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
             )
 
-    if storyline_repository is not None or chapter_repository is not None:
+    if storyline_repository is not None or chapter_repository is not None or narrative_event_repository is not None:
         try:
             persist_bundle_extras(
                 novel_id,
@@ -647,6 +670,7 @@ async def sync_chapter_narrative_after_save(
                 storyline_repository,
                 chapter_repository,
                 plot_arc_repository,
+                narrative_event_repository,
             )
         except Exception as e:
             logger.warning(
