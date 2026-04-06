@@ -102,9 +102,19 @@
           ），否则数据库状态不会推进。若本书曾异常挂起，请先点「解除挂起并清零计数」或监控大盘「重置」。
         </n-alert>
         <n-form>
-          <n-form-item label="本次最多生成章节数（成本控制）">
-            <n-input-number v-model:value="startConfig.max_auto_chapters" :min="1" :max="200" />
+          <n-form-item label="保护上限（章节数，防止意外消耗）">
+            <n-input-number 
+              v-model:value="startConfig.max_auto_chapters" 
+              :min="1" 
+              :max="9999"
+              :step="100"
+              style="width: 100%"
+            />
           </n-form-item>
+          <n-alert type="info" :show-icon="false" style="font-size: 11px; margin-top: -8px">
+            达到<strong>目标章节数</strong>时会自动完成全书；此上限仅作为保护措施，避免异常情况下无限消耗成本。
+            建议设置为 <strong>目标章节数 + 10~20</strong> 章的冗余量。
+          </n-alert>
         </n-form>
       </n-space>
     </n-modal>
@@ -123,7 +133,7 @@ const message = useMessage()
 const status = ref(null)
 const toggling = ref(false)
 const showStartModal = ref(false)
-const startConfig = ref({ max_auto_chapters: 50 })
+const startConfig = ref({ max_auto_chapters: 9999 })  // 保护上限，默认几乎无限制，由 target_chapters 控制
 /** HTTP/1.1 下同域长连接约 6 路；避免与日志 /stream 双开占满导致其它 API 挂起 */
 let statusPollTimer = null
 /** novel_id 在库中不存在(404)时不再轮询，避免旧标签页/错 slug 刷屏访问日志 */
