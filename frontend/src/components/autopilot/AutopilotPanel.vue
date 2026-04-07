@@ -94,24 +94,32 @@
     </n-space>
 
     <!-- 启动配置弹窗 -->
-    <n-modal v-model:show="showStartModal" title="自动驾驶配置" preset="dialog" positive-text="启动" @positive-click="start">
+    <n-modal v-model:show="showStartModal" title="启动全托管" preset="dialog" positive-text="启动" @positive-click="start">
       <n-space vertical :size="12" style="width: 100%">
         <n-alert type="success" :show-icon="true" style="font-size: 12px">
           <strong>自动托管</strong>：守护进程已在后端自动启动，配置好参数后点击"启动"即可开始自动写作。
         </n-alert>
         <n-form>
+          <!-- 目标章数（只读显示） -->
+          <n-form-item label="目标章数">
+            <n-input-number 
+              :value="targetChapters"
+              disabled
+              style="width: 100%"
+            />
+          </n-form-item>
+          <!-- 保护上限 -->
           <n-form-item label="保护上限（章节数，防止意外消耗）">
             <n-input-number 
               v-model:value="startConfig.max_auto_chapters" 
-              :min="1" 
+              :min="targetChapters"
               :max="9999"
-              :step="100"
+              :step="10"
               style="width: 100%"
             />
           </n-form-item>
           <n-alert type="info" :show-icon="false" style="font-size: 11px; margin-top: -8px">
-            达到<strong>目标章节数</strong>时会自动完成全书；此上限仅作为保护措施，避免异常情况下无限消耗成本。
-            建议设置为 <strong>目标章节数 + 10~20</strong> 章的冗余量。
+            达到 <strong>{{ targetChapters }} 章</strong> 目标时自动完成全书；保护上限已自动设置为 <strong>目标 + 20</strong>。
           </n-alert>
         </n-form>
       </n-space>
@@ -131,7 +139,10 @@ const message = useMessage()
 const status = ref(null)
 const toggling = ref(false)
 const showStartModal = ref(false)
-const startConfig = ref({ max_auto_chapters: 50 })  // 默认托管章节数
+const startConfig = ref({ max_auto_chapters: 120 })  // 默认保护上限
+
+// 目标章数（从 status 获取）
+const targetChapters = computed(() => status.value?.target_chapters || 100)
 /** HTTP/1.1 下同域长连接约 6 路；避免与日志 /stream 双开占满导致其它 API 挂起 */
 let statusPollTimer = null
 /** novel_id 在库中不存在(404)时不再轮询，避免旧标签页/错 slug 刷屏访问日志 */
@@ -252,7 +263,12 @@ watch(
   }
 )
 
-function openStartModal() { showStartModal.value = true }
+function openStartModal() {
+  // 打开弹窗时，自动计算保护上限 = 目标 + 20
+  const target = status.value?.target_chapters || 100
+  startConfig.value.max_auto_chapters = target + 20
+  showStartModal.value = true
+}
 
 async function start() {
   toggling.value = true
