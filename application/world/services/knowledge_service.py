@@ -62,6 +62,7 @@ class KnowledgeService:
                 open_threads=ch.get("open_threads", ""),
                 consistency_note=ch.get("consistency_note", ""),
                 beat_sections=ch.get("beat_sections", []),
+                micro_beats=ch.get("micro_beats", []),
                 sync_status=ch.get("sync_status", "draft")
             )
             for ch in data.get("chapters", [])

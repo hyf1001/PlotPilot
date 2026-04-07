@@ -73,6 +73,9 @@ export interface MacroDiagnosisResult {
   breakpoints: LogicBreakpoint[]
   breakpoint_count: number
   status: 'pending' | 'completed' | 'failed'
+  resolved: boolean
+  resolved_at: string | null
+  resolved_by: string | null
   error_message: string | null
   created_at: string
 }
@@ -119,6 +122,12 @@ export const macroRefactorApi = {
       null,
       { params: traits ? { traits } : {} }
     ) as unknown as Promise<MacroDiagnosisResult>,
+
+  /** POST /api/v1/novels/{novel_id}/macro-refactor/diagnosis/{diagnosis_id}/resolve */
+  resolveDiagnosis: (novelId: string, diagnosisId: string) =>
+    apiClient.post<{ success: boolean; message: string }>(
+      `/novels/${novelId}/macro-refactor/diagnosis/${diagnosisId}/resolve`
+    ) as unknown as Promise<{ success: boolean; message: string }>,
 }
 
 // ── 实体叙事状态 ────────────────────────────────────────────

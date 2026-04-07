@@ -921,8 +921,10 @@ class ContextBudgetAllocator:
     ) -> str:
         """获取宏观诊断断点（人设冲突提醒）
         
-        从最新的宏观诊断结果中提取冲突断点，注入到后续生成的提示词中，
+        从最新的未解决宏观诊断结果中提取冲突断点，注入到后续生成的提示词中，
         提醒 LLM 避免继续犯相同的人设错误。
+        
+        已解决的诊断结果不会被注入。
         
         Args:
             novel_id: 小说 ID
@@ -936,11 +938,11 @@ class ContextBudgetAllocator:
             
             db = get_database()
             
-            # 获取最新诊断结果
+            # 获取最新未解决的诊断结果（关键：resolved = 0）
             sql = """
                 SELECT breakpoints, trait, trigger_reason, created_at
                 FROM macro_diagnosis_results
-                WHERE novel_id = ? AND status = 'completed'
+                WHERE novel_id = ? AND status = 'completed' AND resolved = 0
                 ORDER BY created_at DESC
                 LIMIT 1
             """

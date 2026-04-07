@@ -29,8 +29,8 @@
     <!-- 自动诊断结果展示 -->
     <div v-if="latestDiagnosis" class="step-block diagnosis-result-block">
       <div class="step-title">
-        <n-tag :type="latestDiagnosis.status === 'completed' ? 'success' : 'error'" round size="small">
-          {{ latestDiagnosis.status === 'completed' ? '已完成' : '失败' }}
+        <n-tag :type="latestDiagnosis.resolved ? 'default' : (latestDiagnosis.status === 'completed' ? 'success' : 'error')" round size="small">
+          {{ latestDiagnosis.resolved ? '已解决' : (latestDiagnosis.status === 'completed' ? '已完成' : '失败') }}
         </n-tag>
         <span>最近诊断结果</span>
         <n-text depth="3" style="font-size:12px">{{ formatTime(latestDiagnosis.created_at) }}</n-text>
@@ -54,14 +54,34 @@
         </n-space>
 
         <template v-if="latestDiagnosis.status === 'completed'">
-          <n-alert v-if="latestDiagnosis.breakpoint_count === 0" type="success" :show-icon="true" style="font-size:12px">
-            未发现冲突断点，人设一致性良好
+          <!-- 已解决状态 -->
+          <n-alert v-if="latestDiagnosis.resolved" type="success" :show-icon="true" style="font-size:12px">
+            已标记为「已解决」，不再注入后续章节的提示词
+            <template v-if="latestDiagnosis.resolved_at">
+              <br>解决时间：{{ formatTime(latestDiagnosis.resolved_at) }}
+            </template>
           </n-alert>
-          <n-alert v-else type="warning" :show-icon="true" style="font-size:12px">
-            发现 {{ latestDiagnosis.breakpoint_count }} 个冲突断点
-            <n-button size="tiny" text type="primary" style="margin-left:8px" @click="useDiagnosisBreakpoints">
-              查看详情
+          <!-- 未解决且有断点 -->
+          <template v-else-if="latestDiagnosis.breakpoint_count > 0">
+            <n-alert type="warning" :show-icon="true" style="font-size:12px">
+              发现 {{ latestDiagnosis.breakpoint_count }} 个冲突断点（会注入提示词）
+              <n-button size="tiny" text type="primary" style="margin-left:8px" @click="useDiagnosisBreakpoints">
+                查看详情
+              </n-button>
+            </n-alert>
+            <n-button
+              size="small"
+              type="success"
+              :loading="resolvingDiagnosis"
+              @click="markAsResolved"
+              style="margin-top:4px"
+            >
+              标记为已解决
             </n-button>
+          </template>
+          <!-- 未解决但无断点 -->
+          <n-alert v-else type="success" :show-icon="true" style="font-size:12px">
+            未发现冲突断点，人设一致性良好
           </n-alert>
         </template>
 
@@ -268,6 +288,7 @@ watch(deskTick, () => {
 const latestDiagnosis = ref<MacroDiagnosisResult | null>(null)
 const loadingDiagnosis = ref(false)
 const runningFullDiagnosis = ref(false)
+const resolvingDiagnosis = ref(false)
 
 const loadLatestDiagnosis = async () => {
   loadingDiagnosis.value = true
@@ -298,6 +319,31 @@ const runFullDiagnosis = async () => {
     message.error('诊断请求失败')
   } finally {
     runningFullDiagnosis.value = false
+  }
+}
+
+const markAsResolved = async () => {
+  if (!latestDiagnosis.value) return
+  
+  resolvingDiagnosis.value = true
+  try {
+    const result = await macroRefactorApi.resolveDiagnosis(props.slug, latestDiagnosis.value.id)
+    if (result.success) {
+      // 更新本地状态
+      latestDiagnosis.value = {
+        ...latestDiagnosis.value,
+        resolved: true,
+        resolved_at: new Date().toISOString(),
+        resolved_by: 'manual'
+      }
+      message.success(result.message)
+    } else {
+      message.error(result.message)
+    }
+  } catch {
+    message.error('标记已解决失败')
+  } finally {
+    resolvingDiagnosis.value = false
   }
 }
 
