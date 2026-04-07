@@ -1140,6 +1140,13 @@ defineExpose({ ensureAssistedMode })
   overflow: hidden;
 }
 
+.work-tabs :deep(.n-tab-pane) {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .monitor-container {
   height: 100%;
   padding: 20px;
@@ -1216,6 +1223,7 @@ defineExpose({ ensureAssistedMode })
   gap: 16px;
   flex: 1;
   min-height: 0;
+  height: 100%;
 }
 
 .editor-header {
@@ -1244,22 +1252,27 @@ defineExpose({ ensureAssistedMode })
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  height: 100%;
 }
 
 .editor-body :deep(.n-input) {
   flex: 1;
   min-height: 0;
   height: 100% !important;
+  max-height: none !important;
 }
 
 .editor-body :deep(.n-input .n-input-wrapper) {
   height: 100% !important;
+  max-height: none !important;
   display: flex;
   flex-direction: column;
 }
 
 .editor-body :deep(.n-input__textarea-el) {
   flex: 1;
+  height: 100% !important;
+  min-height: 200px;
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.8;
