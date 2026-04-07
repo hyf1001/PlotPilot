@@ -38,17 +38,22 @@
         </n-text>
       </div>
 
-      <!-- 实时写作进度（显示字数、速率、光标） -->
+      <!-- 实时写作进度（显示字数、速率、光标 + 实时文字） -->
       <div v-if="isWritingContent" class="writing-stream-bar">
-        <span class="stream-cursor">▋</span>
-        <span class="stream-info">
-          正在生成第 {{ writingChapterNumber }} 章
-          <span v-if="writingBeatIndex > 0" class="beat-badge">节拍 {{ writingBeatIndex }}</span>
-        </span>
-        <span class="stream-stats">
-          {{ writingWordCount }} 字
-          <span v-if="writingSpeed > 0" class="speed">· {{ writingSpeed }} 字/秒</span>
-        </span>
+        <div class="stream-header-line">
+          <span class="stream-cursor">▋</span>
+          <span class="stream-info">
+            正在生成第 {{ writingChapterNumber }} 章
+            <span v-if="writingBeatIndex > 0" class="beat-badge">节拍 {{ writingBeatIndex }}</span>
+          </span>
+          <span class="stream-stats">
+            {{ writingWordCount }} 字
+            <span v-if="writingSpeed > 0" class="speed">· {{ writingSpeed }} 字/秒</span>
+          </span>
+        </div>
+        <div v-if="writingContent" class="stream-content-preview">
+          <pre class="content-text">{{ writingContent }}</pre>
+        </div>
       </div>
 
       <!-- 仅折叠时间线；写作进度条与卡片标题始终可见 -->
@@ -523,14 +528,18 @@ onUnmounted(() => {
 
 /* 实时写作进度条 */
 .writing-stream-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
   margin-bottom: 8px;
   background: linear-gradient(135deg, rgba(24, 160, 88, 0.06) 0%, rgba(24, 160, 88, 0.02) 100%);
   border: 1px solid rgba(24, 160, 88, 0.15);
   border-radius: 6px;
+  overflow: hidden;
+}
+
+.writing-stream-bar .stream-header-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
   font-size: 12px;
 }
 
@@ -565,6 +574,24 @@ onUnmounted(() => {
 
 .writing-stream-bar .speed {
   color: #18a058;
+}
+
+.writing-stream-bar .stream-content-preview {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(24, 160, 88, 0.1);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.writing-stream-bar .content-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-color-2);
+  font-family: var(--font-mono);
 }
 
 /* 顶部状态栏 */
