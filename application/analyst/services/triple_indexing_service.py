@@ -57,7 +57,9 @@ class TripleIndexingService:
         Returns:
             collection 名称，格式为 novel_{novel_id}_triples
         """
-        return f"novel_{novel_id}_triples"
+        # novel_id 可能包含 "novel-" 前缀，需要去掉避免重复
+        normalized_id = novel_id.replace("novel-", "") if novel_id.startswith("novel-") else novel_id
+        return f"novel_{normalized_id}_triples"
 
     def _triple_to_text(self, triple: Dict[str, Any]) -> str:
         """将三元组转换为可向量化的文本

@@ -49,7 +49,9 @@ class ChapterIndexingService:
         Returns:
             collection 名称，格式为 novel_{novel_id}_chunks
         """
-        return f"novel_{novel_id}_chunks"
+        # novel_id 可能包含 "novel-" 前缀，需要去掉避免重复
+        normalized_id = novel_id.replace("novel-", "") if novel_id.startswith("novel-") else novel_id
+        return f"novel_{normalized_id}_chunks"
 
     async def ensure_collection(self, novel_id: str) -> None:
         """确保 collection 存在，如果不存在则创建

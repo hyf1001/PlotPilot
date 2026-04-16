@@ -11,6 +11,7 @@ import time
 import logging
 import asyncio
 import sqlite3
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -540,6 +541,12 @@ class AutopilotDaemon:
         if needs_buffer:
             outline = f"【缓冲章：日常过渡】{outline}。主角战后休整，与配角闲聊，展示收获，节奏轻松。"
 
+        outline = self._merge_seam_requirements_into_outline(
+            novel.novel_id.value,
+            chapter_num,
+            outline,
+        )
+
         logger.info(f"[{novel.novel_id}] 📖 开始写第 {chapter_num} 章：{outline[:60]}...")
         logger.info(f"[{novel.novel_id}]    进度: {current_chapters}/{target_chapters} 章（目标）")
 
@@ -688,15 +695,54 @@ class AutopilotDaemon:
 
         if use_wf and chapter_content.strip():
             try:
-                await self.chapter_workflow.post_process_generated_chapter(
+                post = await self.chapter_workflow.post_process_generated_chapter(
                     novel.novel_id.value, chapter_num, outline, chapter_content, scene_director=None
                 )
+                chapter_content = post.get("content") or chapter_content
+                seam_rewrite_info = post.get("seam_rewrite_info") or {}
+                await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="draft")
                 logger.info(f"[{novel.novel_id}]    ✅ post_process_generated_chapter 完成")
+                if getattr(self.chapter_workflow, "_requires_manual_seam_revision", None) and \
+                        self.chapter_workflow._requires_manual_seam_revision(seam_rewrite_info):
+                    logger.warning(
+                        "[%s] 第 %s 章接缝复检未通过，进入人工修订: attempts=%s status=%s",
+                        novel.novel_id,
+                        chapter_num,
+                        seam_rewrite_info.get("attempts"),
+                        seam_rewrite_info.get("status"),
+                    )
+                    await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="reviewing")
+                    novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+                    novel.last_audit_chapter_number = chapter_num
+                    novel.last_audit_narrative_ok = False
+                    novel.last_audit_at = datetime.now(timezone.utc).isoformat()
+                    novel.last_audit_issues = [{
+                        "type": "seam_check_failed",
+                        "message": "章节接缝复检未通过，需要人工修订开头后再继续。",
+                    }]
+                    self._flush_novel(novel)
+                    return
             except Exception as e:
                 logger.warning(f"post_process_generated_chapter 失败（仍落库）：{e}")
 
         # 7. 章节完成，标记 completed
         await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="completed")
+
+        try:
+            await self._maybe_rewrite_next_chapter_outline(
+                novel=novel,
+                current_chapter_node=next_chapter_node,
+                current_outline=outline,
+                current_content=chapter_content,
+            )
+        except Exception as e:
+            logger.warning(
+                "[%s] 第 %s 章完成后自动修正下一章大纲失败：%s",
+                novel.novel_id,
+                chapter_num,
+                e,
+                exc_info=True,
+            )
 
         # 8. 更新计数器，重置节拍索引
         novel.current_auto_chapters = (novel.current_auto_chapters or 0) + 1
@@ -707,22 +753,382 @@ class AutopilotDaemon:
 
         logger.info(f"[{novel.novel_id}] 🎉 第 {chapter_num} 章完成：{len(chapter_content)} 字 (共 {novel.current_auto_chapters}/{novel.target_chapters} 章)")
 
+    def _merge_seam_requirements_into_outline(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+    ) -> str:
+        """将上一章接缝卡注入本章大纲，防止规划层另起新场。"""
+        if chapter_number <= 1:
+            return outline
+
+        seam = self._get_previous_chapter_seam(novel_id, chapter_number)
+        if not seam:
+            return outline
+
+        parts = []
+        if seam.get("ending_state"):
+            parts.append(f"上一章章末状态：{seam['ending_state']}")
+        if seam.get("ending_emotion"):
+            parts.append(f"上一章章末情绪：{seam['ending_emotion']}")
+        if seam.get("carry_over_question"):
+            parts.append(f"本章必须承接：{seam['carry_over_question']}")
+        if seam.get("next_opening_hint"):
+            parts.append(f"建议开场提示：{seam['next_opening_hint']}")
+        if not parts:
+            return outline
+
+        seam_block = (
+            "【章节接缝硬约束】\n"
+            + "\n".join(parts)
+            + "\n要求：本章开头必须直接承接以上接缝，不得跳成次日新事件或无关新场面。\n"
+        )
+        if seam.get("carry_over_question"):
+            normalized_outline = self._normalize_seam_text(outline)
+            normalized_question = self._normalize_seam_text(str(seam["carry_over_question"]))
+            if normalized_question and normalized_question not in normalized_outline:
+                logger.info("[%s] 第 %s 章大纲已注入接缝硬约束", novel_id, chapter_number)
+        return f"{seam_block}\n【本章规划】\n{outline}"
+
+    def _get_previous_chapter_seam(
+        self,
+        novel_id: str,
+        chapter_number: int,
+    ) -> Optional[Dict[str, str]]:
+        knowledge_repo = getattr(self.context_builder, "knowledge_repository", None)
+        if knowledge_repo is None:
+            return None
+        try:
+            knowledge = knowledge_repo.get_by_novel_id(novel_id)
+        except Exception as e:
+            logger.debug("读取上一章接缝卡失败: %s", e)
+            return None
+        if not knowledge:
+            return None
+        previous = next(
+            (ch for ch in knowledge.chapters if getattr(ch, "chapter_id", None) == chapter_number - 1),
+            None,
+        )
+        if previous is None:
+            return None
+        return {
+            "ending_state": getattr(previous, "ending_state", "") or "",
+            "ending_emotion": getattr(previous, "ending_emotion", "") or "",
+            "carry_over_question": getattr(previous, "carry_over_question", "") or "",
+            "next_opening_hint": getattr(previous, "next_opening_hint", "") or "",
+        }
+
+    @staticmethod
+    def _normalize_seam_text(text: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", (text or "").lower())
+
+    async def _maybe_rewrite_next_chapter_outline(
+        self,
+        novel: Novel,
+        current_chapter_node,
+        current_outline: str,
+        current_content: str,
+    ) -> None:
+        """最小版重规划：当前章与下一章大纲冲突时，仅重写下一章 outline。"""
+        next_chapter_node = await self._find_chapter_node_after(
+            novel.novel_id.value,
+            current_chapter_node.number,
+        )
+        if not next_chapter_node:
+            return
+
+        seam = self._build_chapter_seam_snapshot(
+            novel.novel_id.value,
+            current_chapter_node.number,
+            current_content,
+        )
+        has_seam_signal = any(seam.get(key) for key in (
+            "ending_state",
+            "carry_over_question",
+            "next_opening_hint",
+        ))
+        if not has_seam_signal:
+            return
+
+        original_outline = (
+            next_chapter_node.outline
+            or next_chapter_node.description
+            or next_chapter_node.title
+            or ""
+        ).strip()
+        if not original_outline:
+            return
+
+        conflict, reason = self._outline_conflicts_with_previous_seam(original_outline, seam)
+        if not conflict:
+            return
+
+        rewritten_outline = await self._rewrite_next_chapter_outline(
+            novel=novel,
+            current_chapter_number=current_chapter_node.number,
+            current_outline=current_outline,
+            next_chapter_node=next_chapter_node,
+            seam=seam,
+            reason=reason,
+        )
+        rewritten_outline = (rewritten_outline or "").strip()
+        if not rewritten_outline or rewritten_outline == original_outline:
+            return
+
+        next_chapter_node.outline = rewritten_outline
+        metadata = dict(getattr(next_chapter_node, "metadata", {}) or {})
+        metadata["auto_replanned_from_chapter"] = current_chapter_node.number
+        metadata["auto_replanned_reason"] = reason
+        metadata["auto_replanned_at"] = datetime.now(timezone.utc).isoformat()
+        next_chapter_node.metadata = metadata
+        await self.story_node_repo.update(next_chapter_node)
+        logger.warning(
+            "[%s] 第 %s 章与第 %s 章大纲冲突，已自动重写下一章大纲：%s",
+            novel.novel_id,
+            current_chapter_node.number,
+            next_chapter_node.number,
+            reason,
+        )
+
+    async def _find_chapter_node_after(self, novel_id: str, chapter_number: int):
+        all_nodes = await self.story_node_repo.get_by_novel(novel_id)
+        chapter_nodes = sorted(
+            [n for n in all_nodes if n.node_type.value == "chapter"],
+            key=lambda n: n.number,
+        )
+        for node in chapter_nodes:
+            if node.number > chapter_number:
+                return node
+        return None
+
+    def _build_chapter_seam_snapshot(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        content: str,
+    ) -> Dict[str, str]:
+        knowledge_repo = getattr(self.context_builder, "knowledge_repository", None)
+        if knowledge_repo is not None:
+            try:
+                knowledge = knowledge_repo.get_by_novel_id(novel_id)
+                if knowledge:
+                    current = next(
+                        (
+                            ch for ch in knowledge.chapters
+                            if getattr(ch, "chapter_id", None) == chapter_number
+                        ),
+                        None,
+                    )
+                    if current and any(
+                        getattr(current, field, "") for field in (
+                            "ending_state",
+                            "ending_emotion",
+                            "carry_over_question",
+                            "next_opening_hint",
+                        )
+                    ):
+                        return {
+                            "ending_state": getattr(current, "ending_state", "") or "",
+                            "ending_emotion": getattr(current, "ending_emotion", "") or "",
+                            "carry_over_question": getattr(current, "carry_over_question", "") or "",
+                            "next_opening_hint": getattr(current, "next_opening_hint", "") or "",
+                        }
+            except Exception as e:
+                logger.debug("读取当前章接缝卡失败，回退正文尾部启发式: %s", e)
+        return self._derive_seam_snapshot_from_content(content)
+
+    def _derive_seam_snapshot_from_content(self, content: str) -> Dict[str, str]:
+        paragraphs = [p.strip() for p in re.split(r"\n+", content or "") if p.strip()]
+        tail_paragraphs = paragraphs[-2:] if paragraphs else []
+        ending_state = "\n".join(tail_paragraphs)[-160:].strip()
+        ending_emotion = ""
+        carry_over_question = ""
+        next_opening_hint = ""
+
+        question_candidates = re.findall(r"[^。！？!?]{4,40}[？?]", content or "")
+        if question_candidates:
+            carry_over_question = question_candidates[-1].strip()
+
+        if tail_paragraphs:
+            tail_text = " ".join(tail_paragraphs)
+            emotion_markers = [
+                "愤怒", "痛苦", "震惊", "恐惧", "悲伤", "苦涩", "清醒",
+                "决绝", "迟疑", "紧张", "压抑", "复杂", "不安",
+            ]
+            hits = [marker for marker in emotion_markers if marker in tail_text]
+            if hits:
+                ending_emotion = "、".join(hits[:3])
+
+            opening_candidates = re.findall(
+                r"(?:去|前往|赶往|潜入|进入|返回|追查|查|寻找|赶去)[^。！？!?]{0,18}",
+                tail_text,
+            )
+            if opening_candidates:
+                next_opening_hint = opening_candidates[-1].strip("，,；; ")
+
+        if not carry_over_question and ending_state:
+            sentences = [s.strip() for s in re.split(r"[。！？!?]", ending_state) if s.strip()]
+            if sentences:
+                carry_over_question = sentences[-1][:40]
+
+        if not next_opening_hint and ending_state:
+            next_opening_hint = ending_state[-40:]
+
+        return {
+            "ending_state": ending_state,
+            "ending_emotion": ending_emotion,
+            "carry_over_question": carry_over_question,
+            "next_opening_hint": next_opening_hint,
+        }
+
+    def _outline_conflicts_with_previous_seam(
+        self,
+        outline: str,
+        seam: Dict[str, str],
+    ) -> tuple[bool, str]:
+        normalized_outline = self._normalize_seam_text(outline)
+        anchor_score = self._calculate_outline_anchor_score(normalized_outline, seam)
+        reset_markers = (
+            "次日", "翌日", "第二天", "天亮", "清晨", "黎明", "晨光", "早晨",
+        )
+        has_reset_marker = any(marker in outline for marker in reset_markers)
+
+        if anchor_score >= 2:
+            return False, ""
+        if has_reset_marker and anchor_score == 0:
+            return True, "下一章大纲另起时间场景，且未承接上一章接缝"
+        if anchor_score == 0 and (seam.get("carry_over_question") or seam.get("next_opening_hint")):
+            return True, "下一章大纲未覆盖上一章必须回应的问题或行动"
+        return False, ""
+
+    def _calculate_outline_anchor_score(self, normalized_outline: str, seam: Dict[str, str]) -> int:
+        score = 0
+        seen = set()
+        for field in ("carry_over_question", "next_opening_hint", "ending_state"):
+            keywords = self._extract_seam_keywords(seam.get(field, ""))
+            field_hits = 0
+            for keyword in keywords:
+                if keyword in seen:
+                    continue
+                if keyword in normalized_outline:
+                    seen.add(keyword)
+                    field_hits += 1
+            score += min(field_hits, 2)
+        return score
+
+    def _extract_seam_keywords(self, text: str) -> List[str]:
+        normalized = self._normalize_seam_text(text)
+        if len(normalized) < 2:
+            return []
+        stop_keywords = {
+            "上一", "一章", "本章", "状态", "情绪", "问题", "提示",
+            "必须", "承接", "建议", "开场", "然后", "自己", "他们",
+            "因为", "如果", "没有", "不是", "一个",
+        }
+        keywords: List[str] = []
+        for size in (4, 3, 2):
+            if len(normalized) < size:
+                continue
+            for i in range(0, len(normalized) - size + 1):
+                token = normalized[i:i + size]
+                if token in stop_keywords:
+                    continue
+                if token not in keywords:
+                    keywords.append(token)
+                if len(keywords) >= 10:
+                    return keywords
+        return keywords
+
+    async def _rewrite_next_chapter_outline(
+        self,
+        novel: Novel,
+        current_chapter_number: int,
+        current_outline: str,
+        next_chapter_node,
+        seam: Dict[str, str],
+        reason: str,
+    ) -> Optional[str]:
+        if not self.llm_service:
+            return None
+
+        prompt = self._build_next_chapter_outline_replan_prompt(
+            current_chapter_number=current_chapter_number,
+            current_outline=current_outline,
+            next_chapter_node=next_chapter_node,
+            seam=seam,
+            reason=reason,
+        )
+        config = GenerationConfig(max_tokens=280, temperature=0.45)
+        try:
+            result = await self.llm_service.generate(prompt, config)
+        except Exception as e:
+            logger.warning(
+                "[%s] 自动重写第 %s 章大纲失败：%s",
+                novel.novel_id,
+                next_chapter_node.number,
+                e,
+            )
+            return None
+        return (result.content or "").strip()
+
+    def _build_next_chapter_outline_replan_prompt(
+        self,
+        current_chapter_number: int,
+        current_outline: str,
+        next_chapter_node,
+        seam: Dict[str, str],
+        reason: str,
+    ) -> Prompt:
+        current_outline = (current_outline or "").strip() or "无"
+        next_outline = (
+            next_chapter_node.outline
+            or next_chapter_node.description
+            or next_chapter_node.title
+            or "无"
+        ).strip()
+        system = """你是长篇小说续写规划编辑。你的任务是只重写“下一章大纲”，让它严格承接上一章已写成的剧情事实。
+
+必须遵守：
+1. 以上一章已发生的事实为最高优先级，不得推翻。
+2. 只重写下一章大纲，不要重写正文，不要解释原因。
+3. 开头必须直接承接上一章结尾，不得另起“次日/清晨/突然收到新线索”式新开局，除非上一章结尾本身明确切到了那里。
+4. 尽量保留原下一章大纲里仍然兼容的主线目标，但可以调整入口场景、推进顺序和信息揭露时机。
+5. 只输出一段 100-180 字的中文章节大纲，不要加标题、序号、引号或说明。"""
+        user = f"""上一章：第 {current_chapter_number} 章
+上一章原大纲：
+{current_outline}
+
+上一章接缝信息：
+- 章末状态：{seam.get("ending_state", "") or "无"}
+- 章末情绪：{seam.get("ending_emotion", "") or "无"}
+- 必须回应：{seam.get("carry_over_question", "") or "无"}
+- 开场提示：{seam.get("next_opening_hint", "") or "无"}
+
+待修正章节：第 {next_chapter_node.number} 章《{next_chapter_node.title}》
+原下一章大纲：
+{next_outline}
+
+触发重写原因：
+{reason}
+
+现在请直接输出修正后的下一章大纲。"""
+        return Prompt(system=system, user=user)
+
     async def _handle_auditing(self, novel: Novel):
         """处理审计（含张力打分）"""
         if not self._is_still_running(novel):
             return
 
-        chapter_num = novel.current_act * 10 + novel.current_chapter_in_act  # 刚写完的章节
-
         from domain.novel.value_objects.novel_id import NovelId
         from domain.novel.value_objects.chapter_id import ChapterId
 
-        chapter = self.chapter_repository.get_by_novel_and_number(
-            NovelId(novel.novel_id.value), chapter_num
-        )
+        chapters = self.chapter_repository.list_by_novel(NovelId(novel.novel_id.value))
+        chapter = self._get_latest_completed_chapter(chapters)
         if not chapter:
             novel.current_stage = NovelStage.WRITING
             return
+        chapter_num = chapter.number
 
         content = chapter.content or ""
         chapter_id = ChapterId(chapter.id)
@@ -819,6 +1225,21 @@ class AutopilotDaemon:
         
         # 7. 🆕 摘要生成钩子（双轨融合 - 轨道一）
         await self._maybe_generate_summaries(novel, len(completed))
+
+    @staticmethod
+    def _get_latest_completed_chapter(chapters):
+        """从章节列表中找到最新的已完成章节。
+
+        审计阶段不能依赖 current_act/current_chapter_in_act 反推章节号，
+        因为幕内缓冲章、重规划和断点续写会让该值偏离真实章节编号。
+        """
+        completed = [
+            chapter for chapter in chapters
+            if getattr(chapter.status, "value", chapter.status) == "completed"
+        ]
+        if not completed:
+            return None
+        return max(completed, key=lambda chapter: int(chapter.number))
 
     def _get_voice_service(self):
         """优先复用章后管线里的 voice service，避免配置分叉。"""

@@ -29,6 +29,27 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _safe_int(value: Any, default: int) -> int:
+    """尽力从任意值中解析整数，失败时回退默认值。"""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if digits:
+            try:
+                return int(digits)
+            except ValueError:
+                return default
+        return default
+
+
 class StateUpdater:
     """状态更新应用服务
 
@@ -116,7 +137,7 @@ class StateUpdater:
             for foreshadow_data in chapter_state.foreshadowing_planted:
                 foreshadowing = Foreshadowing(
                     id=str(uuid.uuid4()),
-                    planted_in_chapter=int(foreshadow_data.get("chapter", chapter_number)),
+                    planted_in_chapter=_safe_int(foreshadow_data.get("chapter", chapter_number), chapter_number),
                     description=foreshadow_data.get("description", ""),
                     importance=ImportanceLevel.MEDIUM,
                     status=ForeshadowingStatus.PLANTED
@@ -127,7 +148,7 @@ class StateUpdater:
             # 解决伏笔
             for resolved_data in chapter_state.foreshadowing_resolved:
                 fid = self._resolve_foreshadowing_id(foreshadowing_registry, resolved_data)
-                resolved_ch = int(resolved_data.get("chapter", chapter_number))
+                resolved_ch = _safe_int(resolved_data.get("chapter", chapter_number), chapter_number)
                 if not fid:
                     logger.warning("Skipping foreshadowing resolution with no identifiable reference: %s", resolved_data)
                     continue
@@ -328,13 +349,64 @@ class StateUpdater:
                 threads = [f.get("description", "")[:40] for f in chapter_state.foreshadowing_planted]
                 open_threads = "伏笔：" + "；".join(t for t in threads if t)
 
+            summary = ""
+            ending_state = ""
+            ending_emotion = ""
+            carry_over_question = ""
+            next_opening_hint = ""
+
+            chapter = None
+            if self.chapter_repository:
+                try:
+                    chapter = self.chapter_repository.get_by_novel_and_number(
+                        NovelId(novel_id), chapter_number
+                    )
+                except Exception as e:
+                    logger.debug("StateUpdater 获取章节正文失败: %s", e)
+
+            content = (getattr(chapter, "content", "") or "").strip()
+            if content:
+                paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+                if paragraphs:
+                    summary = " ".join(paragraphs[:2]).strip()[:260]
+                    ending_state = paragraphs[-1][:180]
+                    if len(paragraphs) >= 2:
+                        next_opening_hint = paragraphs[-2][:120]
+                if not ending_state:
+                    ending_state = content[-180:]
+
+                # 简单情绪锚点：优先取末段中的情绪词
+                tail = paragraphs[-1] if paragraphs else content[-220:]
+                emotion_keywords = [
+                    "愤怒", "恐惧", "悲伤", "震惊", "警惕", "冷静", "苦涩", "决绝",
+                    "紧张", "困惑", "清醒", "痛苦", "压抑", "释然", "迟疑", "愧疚",
+                ]
+                hits = [kw for kw in emotion_keywords if kw in tail]
+                ending_emotion = "、".join(hits[:3]) if hits else tail[:60]
+
+                question_candidates = []
+                for chunk in reversed(paragraphs[-3:] if paragraphs else [tail]):
+                    parts = [seg.strip() for seg in chunk.replace("！", "？").split("？") if seg.strip()]
+                    question_candidates.extend(parts)
+                if question_candidates:
+                    carry_over_question = question_candidates[-1][:120]
+                elif open_threads:
+                    carry_over_question = open_threads[:120]
+
+                if not next_opening_hint:
+                    next_opening_hint = ending_state[:120]
+
             self.knowledge_service.upsert_chapter_summary(
                 novel_id=novel_id,
                 chapter_id=chapter_number,
-                summary="",  # 暂不生成摘要文字（节省 token）
+                summary=summary,
                 key_events=key_events,
                 open_threads=open_threads,
                 consistency_note="",
+                ending_state=ending_state,
+                ending_emotion=ending_emotion,
+                carry_over_question=carry_over_question,
+                next_opening_hint=next_opening_hint,
                 beat_sections=[],
                 sync_status="auto"
             )
