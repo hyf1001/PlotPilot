@@ -13,7 +13,7 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
@@ -104,10 +104,8 @@ async def llm_chapter_extract_bundle(
         pending_foreshadows: 待回收伏笔描述列表（用于消费检测）
     """
     body = chapter_content.strip()
-    # 修复问题 13：对超长章节进行 head+tail 裁剪，确保 ending_* 字段能从章节末尾生成
     if len(body) > 24000:
-        tail_size = 6000
-        body = body[:18000] + "\n\n…（正文中间部分已截断）\n\n" + body[-tail_size:]
+        body = body[:24000] + "\n\n…（正文过长已截断）"
 
     # 构建待回收伏笔提示
     foreshadow_context = ""
@@ -124,10 +122,6 @@ async def llm_chapter_extract_bundle(
   "summary": "string，200～500 字，章末叙事总结，便于检索与衔接",
   "key_events": "string",
   "open_threads": "string",
-  "ending_state": "string，章末客观状态/动作落点，供下一章承接",
-  "ending_emotion": "string，章末主导情绪落点",
-  "carry_over_question": "string，下一章必须优先回应的问题/悬念",
-  "next_opening_hint": "string，建议下一章开场直接承接的动作/场景提示",
   "relation_triples": [ {{"subject": "主体", "predicate": "关系", "object": "客体"}} ],
   "foreshadow_hints": [ {{
     "description": "伏笔或悬念描述",
@@ -150,7 +144,6 @@ async def llm_chapter_extract_bundle(
 - storyline_progress：本章推进的故事线，最多 5 条；无则 []。
 - dialogues：重要对话（推动剧情/展现性格），最多 10 条；无则 []。
 - timeline_events：本章发生的时间线事件（世界内历法/相对时间），最多 5 条；无则 []。
-- ending_state / ending_emotion / carry_over_question / next_opening_hint 必须聚焦章节结尾，避免泛泛总结。
 - 不要编造 beat 列表；summary/key_events/open_threads 用中文；严格合法 JSON。{foreshadow_context}"""
 
     user = f"第 {chapter_number} 章正文如下：\n\n{body}"
@@ -185,10 +178,6 @@ async def llm_chapter_extract_bundle(
         "summary": str(data.get("summary", "")).strip(),
         "key_events": str(data.get("key_events", "")).strip(),
         "open_threads": str(data.get("open_threads", "")).strip(),
-        "ending_state": str(data.get("ending_state", "")).strip(),
-        "ending_emotion": str(data.get("ending_emotion", "")).strip(),
-        "carry_over_question": str(data.get("carry_over_question", "")).strip(),
-        "next_opening_hint": str(data.get("next_opening_hint", "")).strip(),
         "relation_triples": triples_raw[:8],
         "foreshadow_hints": hints_raw[:4],
         "consumed_foreshadows": [str(c).strip() for c in consumed_raw[:5] if str(c).strip()],
@@ -215,13 +204,13 @@ def _fuzzy_match_foreshadow(consumed_desc: str, pending_list: List[Any]) -> Opti
     
     # 优先精确匹配
     for f in pending_list:
-        desc = getattr(f, 'description', None) or getattr(f, 'hidden_clue', None)
+        desc = getattr(f, 'description', None) or getattr(f, 'question', None)
         if desc and desc.lower().strip() == consumed_lower:
             return f
     
     # 其次模糊匹配（包含关系）
     for f in pending_list:
-        desc = getattr(f, 'description', None) or getattr(f, 'hidden_clue', None)
+        desc = getattr(f, 'description', None) or getattr(f, 'question', None)
         if desc:
             desc_lower = desc.lower().strip()
             # 检查是否有足够的重叠
@@ -948,11 +937,25 @@ async def sync_chapter_narrative_after_save(
     chapter_repository: Any = None,
     plot_arc_repository: Any = None,
     narrative_event_repository: Any = None,
-) -> None:
-    """异步：一次 LLM 写 summary/事件/埋线 + 可选三元组与伏笔 + 故事线/张力/对话 → 节拍来自规划 → upsert knowledge → 向量索引。"""
+) -> Dict[str, bool]:
+    """异步：一次 LLM 写 summary/事件/埋线 + 可选三元组与伏笔 + 故事线/张力/对话 → 节拍来自规划 → upsert knowledge → 向量索引。
+
+    返回各子步骤是否成功落库，供章后管线写入 last_audit_* 审阅快照。
+    """
+    empty_flags: Dict[str, bool] = {
+        "vector_stored": False,
+        "foreshadow_stored": False,
+        "triples_extracted": False,
+    }
     if not content or not str(content).strip():
         logger.debug("跳过叙事同步：正文为空 novel=%s ch=%s", novel_id, chapter_number)
-        return
+        return empty_flags
+
+    flags: Dict[str, bool] = {
+        "vector_stored": False,
+        "foreshadow_stored": False,
+        "triples_extracted": False,
+    }
 
     existing = None
     existing_beats: List[str] = []
@@ -979,8 +982,8 @@ async def sync_chapter_narrative_after_save(
                         pending_foreshadow_descs.append(f.description)
                 # 从 SubtextLedgerEntry 获取描述
                 for e in registry.get_pending_subtext_entries():
-                    if e.hidden_clue:
-                        pending_foreshadow_descs.append(e.hidden_clue)
+                    if e.question:
+                        pending_foreshadow_descs.append(e.question)
                 if pending_foreshadow_descs:
                     logger.debug(
                         "伏笔消费检测：获取到 %d 个待回收伏笔 novel=%s ch=%s",
@@ -997,14 +1000,9 @@ async def sync_chapter_narrative_after_save(
         summary = bundle.get("summary") or ""
         key_events = bundle.get("key_events") or ""
         open_threads = bundle.get("open_threads") or ""
-        ending_state = bundle.get("ending_state") or ""
-        ending_emotion = bundle.get("ending_emotion") or ""
-        carry_over_question = bundle.get("carry_over_question") or ""
-        next_opening_hint = bundle.get("next_opening_hint") or ""
     except Exception as e:
         logger.warning("LLM 章末 bundle 失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
         summary, key_events, open_threads = "", "", ""
-        ending_state, ending_emotion, carry_over_question, next_opening_hint = "", "", "", ""
         bundle = {"relation_triples": [], "foreshadow_hints": []}
 
     # --- 独立多维张力评分 ---
@@ -1059,14 +1057,6 @@ async def sync_chapter_narrative_after_save(
             key_events = existing.key_events or ""
         if not open_threads:
             open_threads = existing.open_threads or ""
-        if not ending_state:
-            ending_state = getattr(existing, "ending_state", "") or ""
-        if not ending_emotion:
-            ending_emotion = getattr(existing, "ending_emotion", "") or ""
-        if not carry_over_question:
-            carry_over_question = getattr(existing, "carry_over_question", "") or ""
-        if not next_opening_hint:
-            next_opening_hint = getattr(existing, "next_opening_hint", "") or ""
 
     beat_sections = _resolve_beat_sections(novel_id, chapter_number, existing_beats)
     
@@ -1121,10 +1111,6 @@ async def sync_chapter_narrative_after_save(
         key_events=key_events or "（未提取）",
         open_threads=open_threads or "无",
         consistency_note=consistency_note,
-        ending_state=ending_state,
-        ending_emotion=ending_emotion,
-        carry_over_question=carry_over_question,
-        next_opening_hint=next_opening_hint,
         beat_sections=beat_sections,
         micro_beats=micro_beats if micro_beats else None,
         sync_status="synced" if summary else "draft",
@@ -1139,6 +1125,10 @@ async def sync_chapter_narrative_after_save(
                 triple_repository,
                 foreshadowing_repo,
             )
+            if triple_repository is not None:
+                flags["triples_extracted"] = True
+            if foreshadowing_repo is not None:
+                flags["foreshadow_stored"] = True
         except Exception as e:
             logger.warning(
                 "bundle 三元组/伏笔落库失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
@@ -1168,15 +1158,17 @@ async def sync_chapter_narrative_after_save(
         len(summary),
     )
 
-    if indexing_svc is None:
-        return
-    text_for_vector = summary.strip() if summary.strip() else "；".join(beat_sections) if beat_sections else content[:800]
-    try:
-        await indexing_svc.ensure_collection(novel_id)
-        await indexing_svc.index_chapter_summary(novel_id, chapter_number, text_for_vector)
-        logger.debug("章节向量索引完成 novel=%s ch=%s", novel_id, chapter_number)
-    except Exception as e:
-        logger.warning("章节向量索引失败 novel=%s ch=%s: [%s] %s", novel_id, chapter_number, type(e).__name__, e, exc_info=True)
+    if indexing_svc is not None:
+        text_for_vector = summary.strip() if summary.strip() else "；".join(beat_sections) if beat_sections else content[:800]
+        try:
+            await indexing_svc.ensure_collection(novel_id)
+            await indexing_svc.index_chapter_summary(novel_id, chapter_number, text_for_vector)
+            flags["vector_stored"] = True
+            logger.debug("章节向量索引完成 novel=%s ch=%s", novel_id, chapter_number)
+        except Exception as e:
+            logger.warning("章节向量索引失败 novel=%s ch=%s: [%s] %s", novel_id, chapter_number, type(e).__name__, e, exc_info=True)
+
+    return flags
 
 
 def sync_chapter_narrative_after_save_blocking(

@@ -12,7 +12,6 @@ from domain.ai.services.llm_service import LLMService
 
 if TYPE_CHECKING:
     from application.engine.services.scene_director_service import SceneDirectorService
-    from infrastructure.ai.qdrant_vector_store import QdrantVectorStore
 
 from application.paths import DATA_DIR
 from infrastructure.persistence.storage.file_storage import FileStorage
@@ -25,11 +24,11 @@ from infrastructure.persistence.database.sqlite_storyline_repository import Sqli
 from infrastructure.persistence.database.sqlite_plot_arc_repository import SqlitePlotArcRepository
 from infrastructure.persistence.database.sqlite_voice_vault_repository import SqliteVoiceVaultRepository
 from infrastructure.persistence.database.sqlite_voice_fingerprint_repository import SQLiteVoiceFingerprintRepository
-from infrastructure.persistence.database.sqlite_chapter_generation_metrics_repository import SqliteChapterGenerationMetricsRepository
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from infrastructure.persistence.database.sqlite_cast_repository import SqliteCastRepository
 from infrastructure.persistence.database.sqlite_foreshadowing_repository import SqliteForeshadowingRepository
 from infrastructure.persistence.database.sqlite_timeline_repository import SqliteTimelineRepository
+from infrastructure.ai.config.settings import Settings
 from infrastructure.ai.provider_factory import DynamicLLMService, LLMProviderFactory
 from application.ai.llm_control_service import LLMControlService
 
@@ -62,6 +61,64 @@ logger = logging.getLogger(__name__)
 # 全局存储实例
 _storage = None
 
+
+def _anthropic_api_key() -> Optional[str]:
+    """优先 ANTHROPIC_API_KEY，否则 ANTHROPIC_AUTH_TOKEN（与部分代理/IDE 配置命名一致）。"""
+    raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
+    if raw is None:
+        return None
+    key = raw.strip()
+    return key or None
+
+
+def _anthropic_base_url() -> Optional[str]:
+    u = os.getenv("ANTHROPIC_BASE_URL")
+    return u.strip() if u and u.strip() else None
+
+
+def _anthropic_settings(require_key: bool = True) -> Optional[Settings]:
+    """构建 Anthropic Settings；require_key=False 时无密钥返回 None。"""
+    key = _anthropic_api_key()
+    if not key:
+        if require_key:
+            raise ValueError(
+                "Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (optional: ANTHROPIC_BASE_URL)"
+            )
+        return None
+    return Settings(
+        api_key=key,
+        base_url=_anthropic_base_url(),
+        default_model=os.getenv("WRITING_MODEL", ""),
+    )
+
+
+def _openai_api_key() -> Optional[str]:
+    raw = os.getenv("OPENAI_API_KEY")
+    if raw is None:
+        return None
+    key = raw.strip()
+    return key or None
+
+
+def _openai_base_url() -> Optional[str]:
+    u = os.getenv("OPENAI_BASE_URL")
+    return u.strip() if u and u.strip() else None
+
+
+def _openai_settings(require_key: bool = True) -> Optional[Settings]:
+    """构建 OpenAI Settings；require_key=False 时无密钥返回 None。"""
+    key = _openai_api_key()
+    if not key:
+        if require_key:
+            raise ValueError(
+                "Set OPENAI_API_KEY (optional: OPENAI_BASE_URL)"
+            )
+        return None
+    return Settings(
+        api_key=key,
+        base_url=_openai_base_url(),
+        default_model=os.getenv("WRITING_MODEL") or os.getenv("ARK_MODEL", ""),
+    )
 
 
 @lru_cache
@@ -159,12 +216,6 @@ def get_foreshadowing_repository() -> SqliteForeshadowingRepository:
     return SqliteForeshadowingRepository(get_database())
 
 
-def get_custom_skill_repository():
-    """获取自定义增强技能仓储"""
-    from infrastructure.persistence.database.sqlite_custom_skill_repository import SqliteCustomSkillRepository
-    return SqliteCustomSkillRepository(get_database())
-
-
 def get_snapshot_service():
     """语义快照服务（novel_snapshots；用于编年史 BFF 与回滚）。"""
     from application.snapshot.services.snapshot_service import SnapshotService
@@ -207,8 +258,7 @@ def get_novel_service() -> NovelService:
     return NovelService(
         get_novel_repository(),
         get_chapter_repository(),
-        get_story_node_repository(),
-        SqliteChapterGenerationMetricsRepository(get_database()),
+        get_story_node_repository()
     )
 
 
@@ -224,8 +274,7 @@ def get_chapter_service() -> ChapterService:
     return ChapterService(
         get_chapter_repository(), 
         get_novel_repository(),
-        review_repo,
-        SqliteChapterGenerationMetricsRepository(get_database()),
+        review_repo
     )
 
 
@@ -367,15 +416,24 @@ def get_consistency_checker() -> ConsistencyChecker:
 def get_embedding_service():
     """获取 Embedding 服务（优先从数据库读取配置，环境变量作为 fallback）。
 
-    配置来源：数据库 embedding_config 表（由 EmbeddingConfigService 在首次启动时从环境变量种子写入）。
-    数据库不可用或未配置时返回 None，向量检索功能禁用。
+    配置优先级：
+    1. 数据库 embedding_config 表中的 mode / api_key / base_url / model / model_path / use_gpu
+    2. 环境变量 EMBEDDING_SERVICE / EMBEDDING_MODEL_PATH 等
+    3. 默认值：本地 BAAI/bge-small-zh-v1.5
 
     如果 VECTOR_STORE_ENABLED=false，返回 None。
     """
     if os.getenv("VECTOR_STORE_ENABLED", "true").lower() != "true":
         return None
 
-    # 从数据库读取配置（EmbeddingConfigService 负责首次启动时从 env 种子写入）
+    # 尝试从数据库读取配置
+    _mode = "local"
+    _api_key = ""
+    _base_url = ""
+    _model = "text-embedding-3-small"
+    _model_path = "BAAI/bge-small-zh-v1.5"
+    _use_gpu = True
+
     try:
         from application.ai.embedding_config_service import get_embedding_config_service
         cfg_svc = get_embedding_config_service()
@@ -391,24 +449,31 @@ def get_embedding_service():
             _mode, _model, _model_path,
         )
     except Exception as exc:
-        logger.warning("读取嵌入配置失败，向量检索已禁用: %s", exc)
-        return None
+        # 数据库不可用时回退到环境变量
+        _mode = os.getenv("EMBEDDING_SERVICE", "local").lower()
+        _api_key = os.getenv("EMBEDDING_API_KEY") or ""
+        _base_url = os.getenv("EMBEDDING_BASE_URL") or ""
+        _model_path = os.getenv("EMBEDDING_MODEL_PATH", "BAAI/bge-small-zh-v1.5")
+        _use_gpu = os.getenv("EMBEDDING_USE_GPU", "true").lower() == "true"
+        logger.warning("读取嵌入配置失败，回退到环境变量: %s", exc)
 
     try:
         if _mode == "openai":
-            if not _api_key:
-                logger.warning("embedding mode=openai 但数据库中未配置 API Key，向量检索已禁用")
+            key = _api_key or os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+            if not key:
+                logger.warning("embedding mode=openai 但未配置 API Key，向量检索已禁用")
                 return None
             from infrastructure.ai.openai_embedding_service import OpenAIEmbeddingService
-            logger.info("使用 OpenAI 嵌入服务: base_url=%s, model=%s", _base_url, _model)
+            logger.info("使用 OpenAI 嵌入服务 (DB配置): base_url=%s, model=%s", _base_url, _model)
             return OpenAIEmbeddingService(
-                api_key=_api_key,
+                api_key=key,
                 base_url=_base_url or None,
                 model=_model,
             )
         else:
+            # 默认 local 模式
             from infrastructure.ai.local_embedding_service import LocalEmbeddingService
-            logger.info("使用本地嵌入服务: path=%s, gpu=%s", _model_path, _use_gpu)
+            logger.info("使用本地嵌入服务 (DB配置): path=%s, gpu=%s", _model_path, _use_gpu)
             return LocalEmbeddingService(model_name=_model_path, use_gpu=_use_gpu)
     except Exception as e:
         logger.warning("EmbeddingService 初始化失败: %s", e)
@@ -444,15 +509,11 @@ _vector_store_singleton: Optional[VectorStore] = None
 def get_vector_store() -> Optional[VectorStore]:
     """获取向量存储（单例，整个进程共享同一实例）
 
-    根据环境变量返回 ChromaDB 或 Qdrant 实例。
+    使用本地 FAISS 向量存储（ChromaDBVectorStore），无需外部服务。
 
     环境变量配置：
-    - VECTOR_STORE_ENABLED: 是否启用向量存储（"true" 启用，默认 "true"）
-    - VECTOR_STORE_TYPE: 向量存储类型（"chromadb" 或 "qdrant"，默认 "chromadb"）
-    - VECTOR_STORE_PATH: ChromaDB 本地存储路径（默认 "./data/chromadb"）
-    - QDRANT_HOST: Qdrant 服务器地址（默认 "localhost"，仅 qdrant 类型）
-    - QDRANT_PORT: Qdrant 服务器端口（默认 6333，仅 qdrant 类型）
-    - QDRANT_API_KEY: Qdrant API 密钥（可选，仅 qdrant 类型）
+    - VECTOR_STORE_ENABLED: 是否启用（"true" 启用，默认 "true"）
+    - VECTOR_STORE_PATH: 本地存储路径（默认 "./data/chromadb"）
 
     Returns:
         VectorStore 实例或 None
@@ -461,31 +522,14 @@ def get_vector_store() -> Optional[VectorStore]:
     if _vector_store_singleton is not None:
         return _vector_store_singleton
 
-    # 检查是否启用（默认启用）
     enabled = os.getenv("VECTOR_STORE_ENABLED", "true").lower() == "true"
     if not enabled:
         return None
 
-    # 读取存储类型（默认 ChromaDB）
-    store_type = os.getenv("VECTOR_STORE_TYPE", "chromadb").lower()
-    legacy_qdrant_enabled = os.getenv("QDRANT_ENABLED", "").lower() == "true"
-    if store_type == "chromadb" and legacy_qdrant_enabled:
-        store_type = "qdrant"
-
     try:
-        if store_type == "chromadb":
-            from infrastructure.ai.chromadb_vector_store import ChromaDBVectorStore
-            persist_dir = os.getenv("VECTOR_STORE_PATH", "./data/chromadb")
-            _vector_store_singleton = ChromaDBVectorStore(persist_directory=persist_dir)
-        elif store_type == "qdrant":
-            from infrastructure.ai.qdrant_vector_store import QdrantVectorStore
-            host = os.getenv("QDRANT_HOST", "localhost")
-            port = int(os.getenv("QDRANT_PORT", "6333"))
-            api_key = os.getenv("QDRANT_API_KEY")
-            _vector_store_singleton = QdrantVectorStore(host=host, port=port, api_key=api_key)
-        else:
-            logger.warning(f"Unknown VECTOR_STORE_TYPE: {store_type}, vector store disabled")
-            return None
+        from infrastructure.ai.chromadb_vector_store import ChromaDBVectorStore
+        persist_dir = os.getenv("VECTOR_STORE_PATH", "./data/chromadb")
+        _vector_store_singleton = ChromaDBVectorStore(persist_directory=persist_dir)
         return _vector_store_singleton
     except Exception as e:
         logger.warning(f"Failed to initialize vector store: {e}")
@@ -521,7 +565,6 @@ def get_context_builder() -> ContextBuilder:
         foreshadowing_repository=get_foreshadowing_repository(),
         chapter_element_repository=get_chapter_element_repository(),
         triple_repository=TripleRepository(),
-        knowledge_repository=get_knowledge_repository(),
     )
 
 
@@ -892,61 +935,4 @@ def get_foreshadow_ledger_service():
     """
     from application.analyst.services.foreshadow_ledger_service import ForeshadowLedgerService
     return ForeshadowLedgerService(get_foreshadowing_repository())
-
-
-# ──────────────────────────────────────────────────────────────
-# 以下工厂函数补全之前缺失的依赖，消除路由层直接 import infrastructure 的违规
-# ──────────────────────────────────────────────────────────────
-
-def get_triple_repository():
-    """获取三元组仓储（TripleRepository）"""
-    from infrastructure.persistence.database.triple_repository import TripleRepository
-    return TripleRepository()
-
-
-def get_worldbuilding_repository():
-    """获取世界观仓储（WorldbuildingRepository）"""
-    from infrastructure.persistence.database.worldbuilding_repository import WorldbuildingRepository
-    from application.paths import get_db_path
-    return WorldbuildingRepository(get_db_path())
-
-
-def get_worldbuilding_service():
-    """获取世界观服务（WorldbuildingService）"""
-    from application.world.services.worldbuilding_service import WorldbuildingService
-    return WorldbuildingService(get_worldbuilding_repository())
-
-
-def get_prompt_manager():
-    """获取提示词管理器（PromptManager）"""
-    from infrastructure.ai.prompt_manager import get_prompt_manager as _get_pm
-    return _get_pm()
-
-
-def get_knowledge_graph_service():
-    """获取知识图谱推断服务（KnowledgeGraphService）"""
-    from application.world.services.knowledge_graph_service import KnowledgeGraphService
-    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
-    from application.paths import get_db_path
-    db_path = get_db_path()
-    return KnowledgeGraphService(
-        get_triple_repository(),
-        ChapterElementRepository(db_path),
-        get_story_node_repository(),
-    )
-
-
-def get_continuous_planning_service():
-    """获取 AI 连续规划服务（ContinuousPlanningService）"""
-    from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
-    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
-    from application.paths import get_db_path
-    db_path = get_db_path()
-    return ContinuousPlanningService(
-        story_node_repo=get_story_node_repository(),
-        chapter_element_repo=ChapterElementRepository(db_path),
-        llm_service=get_llm_service(),
-        bible_service=get_bible_service(),
-        chapter_repository=get_chapter_repository(),
-    )
 

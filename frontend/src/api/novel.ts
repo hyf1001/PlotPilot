@@ -14,18 +14,19 @@ export interface NovelDTO {
   title: string
   author: string
   target_chapters: number
-  target_words_per_chapter?: number
-  premise?: string
   stage: string
+  premise?: string
+  /** 服务端从 premise 解析，优先用于「本书锁定」展示 */
+  locked_genre?: string
+  locked_world_preset?: string
   chapters: ChapterDTO[]
   total_word_count: number
   has_bible?: boolean
   has_outline?: boolean
   autopilot_status?: string
   auto_approve_mode?: boolean
-  genre?: string
-  theme_agent_enabled?: boolean
-  enabled_theme_skills?: string[]
+  /** 每章目标字数（与首页建档/PUT 一致；部分接口可能未返回） */
+  target_words_per_chapter?: number
 }
 
 export const novelApi = {
@@ -50,9 +51,12 @@ export const novelApi = {
     title: string
     author: string
     target_chapters: number
-    target_words_per_chapter?: number
     premise?: string
     genre?: string
+    world_preset?: string
+    /** V1 体量档：与 target_chapters 二选一由后端解析 */
+    length_tier?: 'short' | 'standard' | 'epic' | null
+    target_words_per_chapter?: number | null
   }) => apiClient.post<NovelDTO>('/novels', data) as Promise<NovelDTO>,
 
   /**
@@ -72,13 +76,12 @@ export const novelApi = {
    * Update novel basic information
    * PUT /api/v1/novels/{novelId}
    */
-  updateNovel: (novelId: string, data: {
+  updateNovel: (novelId: string, data: { 
     title?: string
     author?: string
     target_chapters?: number
-    target_words_per_chapter?: number
     premise?: string
-    genre?: string
+    target_words_per_chapter?: number
   }) => apiClient.put<NovelDTO>(`/novels/${novelId}`, data) as Promise<NovelDTO>,
 
   /**
@@ -93,53 +96,8 @@ export const novelApi = {
    * PATCH /api/v1/novels/{novelId}/auto-approve-mode
    */
   updateAutoApproveMode: (novelId: string, autoApproveMode: boolean) =>
-    apiClient.patch<NovelDTO>(`/novels/${novelId}/auto-approve-mode`, {
-      auto_approve_mode: autoApproveMode
-    }) as Promise<NovelDTO>,
-
-  /**
-   * Update theme agent enabled
-   * PATCH /api/v1/novels/{novelId}/theme-agent-enabled
-   */
-  updateThemeAgentEnabled: (novelId: string, themeAgentEnabled: boolean) =>
-    apiClient.patch<NovelDTO>(`/novels/${novelId}/theme-agent-enabled`, {
-      theme_agent_enabled: themeAgentEnabled
-    }) as Promise<NovelDTO>,
-
-  /**
-   * Get available theme skills for a novel (filtered by genre)
-   * GET /api/v1/novels/{novelId}/theme-skills/available
-   */
-  getAvailableThemeSkills: (novelId: string) =>
-    apiClient.get<{
-      novel_id: string
-      genre: string
-      available_skills: Array<{
-        key: string
-        name: string
-        description: string
-        compatible_genres: string[]
-      }>
-      enabled_skills: string[]
-    }>(`/novels/${novelId}/theme-skills/available`) as Promise<{
-      novel_id: string
-      genre: string
-      available_skills: Array<{
-        key: string
-        name: string
-        description: string
-        compatible_genres: string[]
-      }>
-      enabled_skills: string[]
-    }>,
-
-  /**
-   * Update enabled theme skills for a novel
-   * PATCH /api/v1/novels/{novelId}/theme-skills
-   */
-  updateEnabledThemeSkills: (novelId: string, skillKeys: string[]) =>
-    apiClient.patch<NovelDTO>(`/novels/${novelId}/theme-skills`, {
-      skill_keys: skillKeys
+    apiClient.patch<NovelDTO>(`/novels/${novelId}/auto-approve-mode`, { 
+      auto_approve_mode: autoApproveMode 
     }) as Promise<NovelDTO>,
 
   /**
@@ -161,39 +119,4 @@ export const novelApi = {
       params: { format },
       responseType: 'blob'
     }) as Promise<Blob>,
-
-  // ─── 自定义技能 CRUD ───
-
-  /**
-   * Create custom theme skill
-   * POST /api/v1/novels/{novelId}/theme-skills/custom
-   */
-  createCustomSkill: (novelId: string, data: {
-    skill_name: string
-    skill_description?: string
-    context_prompt?: string
-    beat_prompt?: string
-    beat_triggers?: string
-    audit_checks?: string[]
-  }) => apiClient.post(`/novels/${novelId}/theme-skills/custom`, data) as Promise<{ key: string; id: string }>,
-
-  /**
-   * Update custom theme skill
-   * PUT /api/v1/novels/{novelId}/theme-skills/custom/{skillId}
-   */
-  updateCustomSkill: (novelId: string, skillId: string, data: {
-    skill_name?: string
-    skill_description?: string
-    context_prompt?: string
-    beat_prompt?: string
-    beat_triggers?: string
-    audit_checks?: string[]
-  }) => apiClient.put(`/novels/${novelId}/theme-skills/custom/${skillId}`, data) as Promise<void>,
-
-  /**
-   * Delete custom theme skill
-   * DELETE /api/v1/novels/{novelId}/theme-skills/custom/{skillId}
-   */
-  deleteCustomSkill: (novelId: string, skillId: string) =>
-    apiClient.delete(`/novels/${novelId}/theme-skills/custom/${skillId}`) as Promise<void>,
 }

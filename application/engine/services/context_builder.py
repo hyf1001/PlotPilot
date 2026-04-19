@@ -6,6 +6,9 @@
 - T1: 可压缩内容（图谱子网、近期幕摘要）—— 按比例压缩
 - T2: 动态内容（最近章节）—— 动态水位线
 - T3: 可牺牲内容（向量召回）—— 预算不足时归零
+
+与 AutoNovelGenerationWorkflow 拼接时：Layer1≈T0+T1，Layer2 段名为 RECENT CHAPTERS（T2），
+Layer3 段名为 VECTOR RECALL（T3）；见 assemble_chapter_bundle_context_text。
 """
 import logging
 from typing import List, Optional, TYPE_CHECKING, Dict, Any
@@ -14,7 +17,6 @@ from dataclasses import dataclass
 from application.world.services.bible_service import BibleService
 from domain.bible.services.relationship_engine import RelationshipEngine
 from domain.novel.services.storyline_manager import StorylineManager
-from domain.novel.value_objects.novel_id import NovelId
 from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.novel.repositories.plot_arc_repository import PlotArcRepository
@@ -22,7 +24,6 @@ from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepo
 from domain.ai.services.vector_store import VectorStore
 from domain.ai.services.embedding_service import EmbeddingService
 from application.engine.services.context_budget_allocator import ContextBudgetAllocator
-from application.config import AppConfig
 
 if TYPE_CHECKING:
     from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
@@ -62,8 +63,6 @@ class ContextBuilder:
         bible_repository=None,
         chapter_element_repository=None,
         triple_repository=None,
-        theme_agent=None,
-        knowledge_repository=None,
     ):
         self.bible_service = bible_service
         self.storyline_manager = storyline_manager
@@ -78,8 +77,6 @@ class ContextBuilder:
         self.bible_repository = bible_repository
         self.chapter_element_repository = chapter_element_repository
         self.triple_repository = triple_repository
-        self.theme_agent = theme_agent  # ThemeAgent 插槽
-        self.knowledge_repository = knowledge_repository
 
         # 预算分配器（核心组件）
         self.budget_allocator = ContextBudgetAllocator(
@@ -91,8 +88,6 @@ class ContextBuilder:
             triple_repository=triple_repository,
             vector_store=vector_store,
             embedding_service=embedding_service,
-            theme_agent=theme_agent,
-            knowledge_repository=knowledge_repository,
         )
 
     def build_voice_anchor_system_section(self, novel_id: str) -> str:
@@ -104,7 +99,7 @@ class ContextBuilder:
         novel_id: str,
         chapter_number: int,
         outline: str,
-        max_tokens: int = AppConfig.CONTEXT_MAX_TOKENS,
+        max_tokens: int = 35000,
         scene_director: Optional[Dict[str, Any]] = None,
     ) -> str:
         """构建上下文（使用预算分配器）
@@ -126,24 +121,15 @@ class ContextBuilder:
             total_budget=max_tokens,
             scene_director=scene_director,
         )
-
-        final_context = allocation.get_final_context()
-        if final_context.strip():
-            return final_context
-        return self._build_legacy_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
+        
+        return allocation.get_final_context()
 
     def build_structured_context(
         self,
         novel_id: str,
         chapter_number: int,
         outline: str,
-        max_tokens: int = AppConfig.CONTEXT_MAX_TOKENS,
+        max_tokens: int = 35000,
         scene_director: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """构建结构化上下文，返回详细信息
@@ -192,7 +178,7 @@ class ContextBuilder:
                 layer3_parts.append(f"=== {slot.name.upper()} ===\n{slot.content}")
                 layer3_tokens += slot.tokens
         
-        result = {
+        return {
             "layer1_text": "\n\n".join(layer1_parts),
             "layer2_text": "\n\n".join(layer2_parts),
             "layer3_text": "\n\n".join(layer3_parts),
@@ -203,290 +189,85 @@ class ContextBuilder:
                 "total": allocation.used_tokens,
             },
         }
-        if any(result[key].strip() for key in ("layer1_text", "layer2_text", "layer3_text")):
-            return result
-        return self._build_legacy_structured_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
 
-    def _build_legacy_context(
-        self,
-        novel_id: str,
-        chapter_number: int,
-        outline: str,
-        max_tokens: int,
-        scene_director: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        structured = self._build_legacy_structured_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
-        return "\n\n".join(
-            part for part in (
-                structured["layer1_text"],
-                structured["layer2_text"],
-                structured["layer3_text"],
-            )
-            if part.strip()
-        )
-
-    def _build_legacy_structured_context(
-        self,
-        novel_id: str,
-        chapter_number: int,
-        outline: str,
-        max_tokens: int,
-        scene_director: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        layer1 = self._build_layer1_legacy(novel_id, chapter_number, outline)
-        layer2 = self._build_layer2_smart_retrieval(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            budget=max_tokens,
-            scene_director=scene_director,
-        )
-        total = len(layer1) + len(layer2)
-        return {
-            "layer1_text": layer1,
-            "layer2_text": layer2,
-            "layer3_text": "",
-            "token_usage": {
-                "layer1": len(layer1),
-                "layer2": len(layer2),
-                "layer3": 0,
-                "total": total,
-            },
-        }
-
-    def _build_layer1_legacy(self, novel_id: str, chapter_number: int, outline: str) -> str:
-        parts: List[str] = []
-        novel = self.novel_repository.get_by_id(novel_id)
-        if novel:
-            parts.append(
-                f"=== NOVEL ===\nTitle: {getattr(novel, 'title', '')}\nAuthor: {getattr(novel, 'author', '')}\nChapter {chapter_number}\nOutline: {outline}"
-            )
-
-        if getattr(self.storyline_manager, "repository", None):
-            storylines = self.storyline_manager.repository.get_by_novel_id(NovelId(novel_id)) or []
-            if storylines:
-                lines = ["=== ACTIVE STORYLINES ===", "Active Storylines:"]
-                for storyline in storylines:
-                    lines.append(f"- {getattr(getattr(storyline, 'storyline_type', None), 'value', '')}")
-                parts.append("\n".join(lines))
-
-        if self.plot_arc_repository:
-            arc = self.plot_arc_repository.get_by_novel_id(NovelId(novel_id))
-            points = []
-            if arc:
-                points = list(getattr(arc, "plot_points", None) or getattr(arc, "key_points", None) or [])
-            if points:
-                points = sorted(points, key=lambda p: p.chapter_number)
-                nearest = min(points, key=lambda p: abs(p.chapter_number - chapter_number))
-                parts.append(
-                    "\n".join(
-                        [
-                            "=== PLOT ARC ===",
-                            "Plot arc (pacing)",
-                            f"Expected tension for this chapter: {getattr(getattr(nearest, 'tension', None), 'value', getattr(nearest, 'tension', ''))}",
-                        ]
-                    )
-                )
-
-        bible = self.bible_service.get_bible_by_novel(novel_id)
-        if bible and getattr(bible, "timeline_notes", None):
-            lines = ["=== BIBLE TIMELINE ===", "Bible timeline notes"]
-            for note in bible.timeline_notes:
-                lines.append(f"- {getattr(note, 'event', '')}: {getattr(note, 'description', '')}")
-            parts.append("\n".join(lines))
-
-        return "\n\n".join(parts)
-
-    def _build_layer2_smart_retrieval(
-        self,
-        novel_id: str,
-        chapter_number: int,
-        outline: str,
-        budget: int,
-        scene_director: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        parts: List[str] = []
-        bible = self.bible_service.get_bible_by_novel(novel_id)
-
-        selected_character_names = None
-        if scene_director and getattr(scene_director, "characters", None):
-            selected_character_names = set(scene_director.characters)
-
-        if bible and getattr(bible, "characters", None):
-            lines = ["=== CHARACTERS ==="]
-            for char in bible.characters:
-                name = getattr(char, "name", "")
-                if selected_character_names and name not in selected_character_names:
-                    continue
-                public_profile = getattr(char, "public_profile", None) or getattr(char, "description", "")
-                hidden_profile = getattr(char, "hidden_profile", None)
-                reveal_chapter = getattr(char, "reveal_chapter", None)
-                lines.append(f"- {name}: {public_profile}")
-                if hidden_profile and (reveal_chapter is None or chapter_number >= reveal_chapter):
-                    lines.append(f"  Hidden: {hidden_profile}")
-            if len(lines) > 1:
-                parts.append("\n".join(lines))
-
-        if bible and getattr(bible, "world_settings", None) and scene_director and getattr(scene_director, "trigger_keywords", None):
-            trigger_lines = ["=== TRIGGERED WORLD SETTINGS ===", "Triggered World Settings"]
-            keywords = [str(keyword).strip() for keyword in scene_director.trigger_keywords if str(keyword).strip()]
-            for setting in bible.world_settings:
-                haystack = " ".join(
-                    str(getattr(setting, field, "") or "")
-                    for field in ("name", "setting_type", "description")
-                )
-                if any(keyword in haystack for keyword in keywords):
-                    trigger_lines.append(
-                        f"- {getattr(setting, 'name', '')}: {getattr(setting, 'description', '')}"
-                    )
-            if len(trigger_lines) > 2:
-                parts.append("\n".join(trigger_lines))
-
-        chapters = self.chapter_repository.list_by_novel(NovelId(novel_id)) or []
-        recent_lines = ["=== RECENT CHAPTERS ==="]
-        for chapter in chapters:
-            if getattr(chapter, "number", 0) < chapter_number:
-                title = getattr(chapter, "title", "") or f"Chapter {getattr(chapter, 'number', '')}"
-                recent_lines.append(
-                    f"- {title}: {getattr(chapter, 'content', '')[:200]}"
-                )
-        if len(recent_lines) > 1:
-            parts.append("\n".join(recent_lines))
-
-        vector_text = self._collect_vector_results(novel_id, chapter_number, outline)
-        if vector_text:
-            parts.append(vector_text)
-
-        layer2 = "\n\n".join(parts)
-        if len(layer2) > budget:
-            layer2 = layer2[:budget]
-        return layer2
-
-    def _collect_vector_results(self, novel_id: str, chapter_number: int, outline: str) -> str:
-        if not getattr(self, "vector_facade", None):
-            return ""
-
-        try:
-            collection = f"novel_{novel_id}_chunks"
-            results = self.vector_facade.sync_search(collection, outline, limit=5)
-        except Exception:
-            return ""
-
-        lines = ["=== VECTOR RESULTS ==="]
-        for item in results:
-            payload = item.get("payload", {})
-            hit_chapter = payload.get("chapter_number")
-            if isinstance(hit_chapter, int) and abs(hit_chapter - chapter_number) > 10:
-                continue
-            text = str(payload.get("text", "")).strip()
-            if text:
-                lines.append(f"- {text}")
-
-        if len(lines) == 1:
-            return ""
-        return "\n".join(lines)
-
-    def magnify_outline_to_beats(self, chapter_number: int, outline: str, target_chapter_words: int = AppConfig.DEFAULT_WORDS_PER_CHAPTER) -> List[Beat]:
+    def magnify_outline_to_beats(self, chapter_number: int, outline: str, target_chapter_words: int = 2500) -> List[Beat]:
         """节拍放大器：将章节大纲拆分为微观节拍
-
+        
         核心策略：
         1. 识别大纲中的关键动作/事件
         2. 为每个动作分配节拍，强制增加感官细节
         3. 控制单章推进速度，避免节奏过载
-        4. 若有 ThemeAgent，优先使用题材专项节拍模板
         """
         beats = []
 
-        # ========== 题材专项开篇节拍（前 3 章） ==========
-        if self.theme_agent and chapter_number <= 3:
-            try:
-                theme_opening = self.theme_agent.get_opening_beats(chapter_number)
-                if theme_opening:
-                    beats = [Beat(description=desc, target_words=tw, focus=focus) for desc, tw, focus in theme_opening]
-                    logger.info(f"节拍放大器：使用题材专项开篇模板（第 {chapter_number} 章，{len(beats)} 个节拍）")
-            except Exception as e:
-                logger.warning(f"ThemeAgent.get_opening_beats 失败（降级默认）：{e}")
-
-        # ========== 题材专项关键词节拍模板 ==========
-        if not beats and self.theme_agent:
-            try:
-                theme_templates = self.theme_agent.get_beat_templates()
-                if theme_templates:
-                    # 按优先级降序排列，首个关键词命中即采用
-                    sorted_templates = sorted(theme_templates, key=lambda t: t.priority, reverse=True)
-                    for tmpl in sorted_templates:
-                        if any(kw in outline for kw in tmpl.keywords):
-                            beats = [Beat(description=desc, target_words=tw, focus=focus) for desc, tw, focus in tmpl.beats]
-                            logger.info(f"节拍放大器：使用题材专项模板（关键词命中，{len(beats)} 个节拍）")
-                            break
-            except Exception as e:
-                logger.warning(f"ThemeAgent.get_beat_templates 失败（降级默认）：{e}")
-
-        # ========== 默认节拍模板（原有逻辑） ==========
-        if not beats:
-            # 开篇黄金法则前三章特殊拦截
-            if chapter_number == 1:
-                beats = [
-                    Beat(description="开篇黄金法则：展现核心冲突，介绍主角出场，建立情感冲击（前300字内必须抓住读者）", target_words=500, focus="hook"),
-                    Beat(description="剧情引入及人物初步互动：展现主角特质并暗示即将发生的事件", target_words=1000, focus="character_intro"),
-                    Beat(description="世界观或当前场景细节：通过具体行动展现，不用抽象叙述", target_words=800, focus="sensory"),
-                    Beat(description="埋下后续剧情伏笔或抛出首个悬念：铺垫第二章", target_words=700, focus="suspense"),
-                ]
-            elif chapter_number == 2:
-                beats = [
-                    Beat(description="承接首章悬念：深化关键人物关系，展现性格差异", target_words=800, focus="dialogue"),
-                    Beat(description="推进主要情节线：引入新的次要冲突或阻碍", target_words=1200, focus="action"),
-                    Beat(description="情绪细节及内心活动：展示人物面对变故的真实反映", target_words=600, focus="emotion"),
-                    Beat(description="为第三章冲突高潮做气氛铺垫", target_words=400, focus="suspense"),
-                ]
-            elif chapter_number == 3:
-                beats = [
-                    Beat(description="前三章的剧情小结或高潮前奏：紧张气氛描写", target_words=600, focus="sensory"),
-                    Beat(description="冲突爆发/悬念高潮：激烈的动作或对峙", target_words=1200, focus="action"),
-                    Beat(description="暴露深层问题或引出更高层面人物背景", target_words=800, focus="emotion"),
-                    Beat(description="建立长线悬念结局：为整卷后续发展铺设巨大好奇心", target_words=400, focus="suspense"),
-                ]
-            # 根据常规关键词回退
-            elif "争吵" in outline or "冲突" in outline or "质问" in outline:
-                beats = [
-                    Beat(description="场景氛围描写：压抑的环境、紧张的气氛、人物的微表情", target_words=500, focus="sensory"),
-                    Beat(description="冲突爆发：主角的质问、对方的反应、情绪的升级", target_words=800, focus="dialogue"),
-                    Beat(description="情绪细节：内心独白、回忆闪回、痛苦的挣扎", target_words=700, focus="emotion"),
-                    Beat(description="冲突结果：决裂、离开、或暂时妥协（不要轻易和好）", target_words=500, focus="action"),
-                ]
-            elif "战斗" in outline or "打斗" in outline or "对决" in outline:
-                beats = [
-                    Beat(description="战前准备：环境描写、双方对峙、紧张的气氛", target_words=400, focus="sensory"),
-                    Beat(description="第一回合：试探性攻击、展示能力、观察弱点", target_words=600, focus="action"),
-                    Beat(description="战斗升级：全力以赴、招式碰撞、环境破坏", target_words=700, focus="action"),
-                    Beat(description="转折点：意外发生、底牌揭露、或受伤", target_words=500, focus="emotion"),
-                    Beat(description="战斗结束：胜负揭晓、战后状态、后续影响", target_words=300, focus="action"),
-                ]
-            elif "发现" in outline or "真相" in outline or "揭露" in outline:
-                beats = [
-                    Beat(description="线索汇聚：主角回忆之前的疑点、逐步推理", target_words=700, focus="emotion"),
-                    Beat(description="真相揭露：关键证据出现、震惊的反应、世界观崩塌", target_words=1000, focus="dialogue"),
-                    Beat(description="情绪余波：接受现实、决定下一步行动", target_words=800, focus="emotion"),
-                ]
-            else:
-                # 默认：日常/过渡场景
-                beats = [
-                    Beat(description="场景开场：环境描写、人物登场、日常互动", target_words=800, focus="sensory"),
-                    Beat(description="主要事件：推进剧情的核心动作或对话", target_words=1200, focus="dialogue"),
-                    Beat(description="场景收尾：情绪沉淀、埋下伏笔、过渡到下一章", target_words=500, focus="emotion"),
-                ]
+        # 开篇黄金法则前三章特殊拦截
+        if chapter_number == 1:
+            beats = [
+                Beat(description="开篇黄金法则：展现核心冲突，介绍主角出场，建立情感冲击（前300字内必须抓住读者）", target_words=500, focus="hook"),
+                Beat(description="剧情引入及人物初步互动：展现主角特质并暗示即将发生的事件", target_words=1000, focus="character_intro"),
+                Beat(description="世界观或当前场景细节：通过具体行动展现，不用抽象叙述", target_words=800, focus="sensory"),
+                Beat(description="埋下后续剧情伏笔或抛出首个悬念：铺垫第二章", target_words=700, focus="suspense"),
+            ]
+        elif chapter_number == 2:
+            beats = [
+                Beat(description="承接首章悬念：深化关键人物关系，展现性格差异", target_words=800, focus="dialogue"),
+                Beat(description="推进主要情节线：引入新的次要冲突或阻碍", target_words=1200, focus="action"),
+                Beat(description="情绪细节及内心活动：展示人物面对变故的真实反映", target_words=600, focus="emotion"),
+                Beat(description="为第三章冲突高潮做气氛铺垫", target_words=400, focus="suspense"),
+            ]
+        elif chapter_number == 3:
+            beats = [
+                Beat(description="前三章的剧情小结或高潮前奏：紧张气氛描写", target_words=600, focus="sensory"),
+                Beat(description="冲突爆发/悬念高潮：激烈的动作或对峙", target_words=1200, focus="action"),
+                Beat(description="暴露深层问题或引出更高层面人物背景", target_words=800, focus="emotion"),
+                Beat(description="建立长线悬念结局：为整卷后续发展铺设巨大好奇心", target_words=400, focus="suspense"),
+            ]
+        # 根据常规关键词回退
+        elif "争吵" in outline or "冲突" in outline or "质问" in outline:
+            beats = [
+                Beat(description="场景氛围描写：压抑的环境、紧张的气氛、人物的微表情", target_words=500, focus="sensory"),
+                Beat(description="冲突爆发：主角的质问、对方的反应、情绪的升级", target_words=800, focus="dialogue"),
+                Beat(description="情绪细节：内心独白、回忆闪回、痛苦的挣扎", target_words=700, focus="emotion"),
+                Beat(description="冲突结果：决裂、离开、或暂时妥协（不要轻易和好）", target_words=500, focus="action"),
+            ]
+        elif "战斗" in outline or "打斗" in outline or "对决" in outline:
+            beats = [
+                Beat(description="战前准备：环境描写、双方对峙、紧张的气氛", target_words=400, focus="sensory"),
+                Beat(description="第一回合：试探性攻击、展示能力、观察弱点", target_words=600, focus="action"),
+                Beat(description="战斗升级：全力以赴、招式碰撞、环境破坏", target_words=700, focus="action"),
+                Beat(description="转折点：意外发生、底牌揭露、或受伤", target_words=500, focus="emotion"),
+                Beat(description="战斗结束：胜负揭晓、战后状态、后续影响", target_words=300, focus="action"),
+            ]
+        elif "发现" in outline or "真相" in outline or "揭露" in outline:
+            beats = [
+                Beat(description="线索汇聚：主角回忆之前的疑点、逐步推理", target_words=700, focus="emotion"),
+                Beat(description="真相揭露：关键证据出现、震惊的反应、世界观崩塌", target_words=1000, focus="dialogue"),
+                Beat(description="情绪余波：接受现实、决定下一步行动", target_words=800, focus="emotion"),
+            ]
+        else:
+            # 默认：四章拍「起承转合」，用信息义务占满篇幅，减少空泛水词
+            beats = [
+                Beat(
+                    description="起：交代场景与人物状态，抛出本章要处理的具体麻烦或悬念（可小但须清晰）。",
+                    target_words=500,
+                    focus="sensory",
+                ),
+                Beat(
+                    description="承：阻碍升级或对手施压，人物关系或信息出现新变化。",
+                    target_words=500,
+                    focus="dialogue",
+                ),
+                Beat(
+                    description="转：主角做出选择、亮出底牌或发现盲点，情节出现可感知的转折。",
+                    target_words=500,
+                    focus="action",
+                ),
+                Beat(
+                    description="合：阶段性结果落地，同时抛出下一章钩子（勿提前剧透全书谜底）。",
+                    target_words=500,
+                    focus="suspense",
+                ),
+            ]
 
         # 调整字数分配
         total_words = sum(b.target_words for b in beats)
@@ -510,20 +291,32 @@ class ContextBuilder:
             "suspense": "悬念铺垫【文学指导】：留下剧情钩子！不要一次性把答案抖露。在结尾营造紧张或神秘气氛，埋下让人欲罢不能的伏笔，保持读者的强烈好奇心。",
         }
 
-        # 合并题材自定义聚焦点说明
-        if self.theme_agent:
-            try:
-                custom_focus = self.theme_agent.get_custom_focus_instructions()
-                if custom_focus:
-                    focus_instructions.update(custom_focus)
-            except Exception as e:
-                logger.warning(f"ThemeAgent.get_custom_focus_instructions 失败（降级跳过）：{e}")
-
         instruction = focus_instructions.get(beat.focus, "")
+
+        sensory_rotation = [
+            "本节拍至少一处环境锚点：光影或空间层次（禁止纯背景说明书式罗列）。",
+            "本节拍至少一处环境锚点：温度、体感或材质。",
+            "本节拍至少一处环境锚点：声音或节奏（含有意义的静默）。",
+            "本节拍至少一处环境锚点：气味或一口味觉细节（若场景合理）。",
+        ]
+        anchor_line = sensory_rotation[beat_index % len(sensory_rotation)]
+
+        if beat.focus == "dialogue":
+            obligation = (
+                "叙事义务：至少 3 轮有信息增量的对话回合（有问有答、推进关系或暴露新事实）；"
+                "避免同义反复与空洞感叹凑字。"
+            )
+        elif beat.focus == "suspense":
+            obligation = "叙事义务：必须留下可追踪的悬念点（人/物/约定/时间之一），不要空喊「事情不对劲」。"
+        else:
+            obligation = (
+                "叙事义务：至少包含「目标→阻碍→反应」中的一步可观察描写；"
+                "或至少 2 轮短对话推动信息。"
+            )
 
         return f"""
 【节拍 {beat_index + 1}/{total_beats}】
-目标字数：{beat.target_words} 字
+目标字数：{beat.target_words} 字（软目标：以完成义务为主，勿用废话硬凑）
 聚焦点：{beat.focus}
 
 {instruction}
@@ -531,8 +324,12 @@ class ContextBuilder:
 节拍内容：
 {beat.description}
 
+密度与可检查要求：
+- {anchor_line}
+- {obligation}
+
 注意：
 - 这是完整章节的一部分，不要写章节标题
-- 不要在节拍结尾强行总结或过渡
+- 不要在节拍结尾强行总结全章
 - 专注于当前节拍的内容，自然衔接到下一节拍
 """.strip()

@@ -89,23 +89,21 @@
             </template>
 
             <div class="collapse-body">
-              <div class="storyline-details">
-                <div class="info-row">
-                  <span class="info-label">章节范围</span>
-                  <span class="info-value">第 {{ storyline.estimated_chapter_start }} – {{ storyline.estimated_chapter_end }} 章</span>
-                </div>
-                <div class="info-row" v-if="storyline.description">
-                  <span class="info-label">描述</span>
-                  <span class="info-value desc">{{ storyline.description }}</span>
-                </div>
-                <div class="info-row" v-if="storyline.progress_summary">
-                  <span class="info-label">进度摘要</span>
-                  <span class="info-value desc">{{ storyline.progress_summary }}</span>
-                </div>
-                <div class="info-row" v-if="storyline.last_active_chapter">
-                  <span class="info-label">最后活跃</span>
-                  <span class="info-value">第 {{ storyline.last_active_chapter }} 章</span>
-                </div>
+              <div class="info-row">
+                <span class="info-label">章节范围</span>
+                <span class="info-value">第 {{ storyline.estimated_chapter_start }} – {{ storyline.estimated_chapter_end }} 章</span>
+              </div>
+              <div class="info-row" v-if="storyline.description">
+                <span class="info-label">描述</span>
+                <span class="info-value desc">{{ storyline.description }}</span>
+              </div>
+              <div class="info-row" v-if="storyline.progress_summary">
+                <span class="info-label">进度摘要</span>
+                <span class="info-value">{{ storyline.progress_summary }}</span>
+              </div>
+              <div class="info-row" v-if="storyline.last_active_chapter">
+                <span class="info-label">最后活跃</span>
+                <span class="info-value">第 {{ storyline.last_active_chapter }} 章</span>
               </div>
               <div class="collapse-milestones" v-if="storyline.milestones?.length">
                 <div class="ms-title">里程碑 ({{ storyline.milestones.length }})</div>
@@ -366,14 +364,14 @@ onMounted(() => {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: var(--text-color-1);
+  color: var(--app-text-primary);
 }
 
 .panel-lead {
   margin: 0;
   font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-color-3);
+  line-height: 1.55;
+  color: var(--app-text-secondary);
 }
 
 .header-actions {
@@ -433,13 +431,6 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.info-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
 .view-switcher {
   flex-shrink: 0;
 }
@@ -458,17 +449,13 @@ onMounted(() => {
   margin-bottom: 8px;
   background: var(--app-surface);
   border: 1px solid var(--aitext-split-border, rgba(0,0,0,0.06));
-  transition:
-    box-shadow 0.2s ease,
-    border-color 0.2s ease,
-    transform 0.2s ease;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
   overflow: hidden;
 }
 
 .sl-collapse :deep(.n-collapse-item:hover) {
-  border-color: var(--color-brand-border, rgba(99, 102, 241, 0.2));
-  box-shadow: 0 6px 18px var(--color-brand-light, rgba(99, 102, 241, 0.08));
-  transform: translateY(-1px);
+  border-color: var(--color-brand-border);
+  box-shadow: 0 6px 18px var(--color-brand-light);
 }
 
 .sl-collapse :deep(.n-collapse-item__header) {
@@ -491,56 +478,60 @@ onMounted(() => {
 }
 
 .collapse-title {
-  font-size: 13.5px !important;
+  font-size: 14px !important;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--app-text-primary) !important;
 }
 
 .collapse-body {
-  padding: 6px 14px 14px;
+  padding: 4px 14px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-}
-
-.storyline-details {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--app-surface-subtle, rgba(15, 23, 42, 0.03));
-  border: 1px solid var(--aitext-split-border, rgba(0,0,0,0.06));
+  gap: 6px;
 }
 
 .info-row {
   display: grid;
   grid-template-columns: 88px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  padding: 4px 0;
+  align-items: start;
+  column-gap: 12px;
+  row-gap: 4px;
+  padding: 6px 0;
+}
+
+@media (max-width: 640px) {
+  .info-row {
+    grid-template-columns: 1fr;
+  }
+
+  .info-value:not(.desc) {
+    text-align: left;
+  }
 }
 
 .info-label {
   font-size: 12px;
-  color: var(--app-text-muted, var(--text-color-3, #94a3b8));
-  line-height: 1.5;
-  min-width: 0;
+  font-weight: 600;
+  color: var(--app-text-secondary);
+  padding-top: 2px;
 }
 
 .info-value {
-  font-size: 12px;
-  color: var(--app-text-primary, var(--text-color-1, #0f172a));
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--app-text-primary);
   text-align: right;
-  line-height: 1.5;
-  min-width: 0;
-  overflow-wrap: anywhere;
+  line-height: 1.55;
 }
 
 .info-value.desc {
   text-align: left;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -553,9 +544,9 @@ onMounted(() => {
 }
 
 .ms-title {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--app-text-secondary, var(--text-color-2, #475569));
+  color: var(--app-text-secondary);
   margin-bottom: 5px;
 }
 
@@ -576,21 +567,21 @@ onMounted(() => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--color-brand, #6366f1);
-  box-shadow: 0 0 0 3px var(--color-brand-light, rgba(99, 102, 241, 0.12));
+  background: var(--color-brand);
   flex-shrink: 0;
 }
 
 .ms-name {
   font-weight: 500;
-  color: var(--app-text-primary, var(--text-color-1, #0f172a));
+  font-size: 12px;
+  color: var(--app-text-primary);
   flex: 1;
 }
 
 .ms-range {
-  font-size: 10.5px;
-  color: var(--app-text-muted, var(--text-color-3, #94a3b8));
-  font-family: monospace;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  font-family: var(--font-mono, monospace);
   flex-shrink: 0;
 }
 
@@ -598,17 +589,5 @@ onMounted(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-}
-
-@media (max-width: 640px) {
-  .info-row {
-    grid-template-columns: 1fr;
-    align-items: flex-start;
-    gap: 4px;
-  }
-
-  .info-value {
-    text-align: left;
-  }
 }
 </style>

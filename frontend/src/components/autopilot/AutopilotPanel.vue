@@ -17,6 +17,13 @@
       style="margin: 4px 0"
     />
 
+    <p v-if="status" class="ap-plan-hint">
+      与首页「目标篇幅」同一套落库参数：计划约
+      <strong>{{ formatWords(planTotalWordsHint) }}</strong> 字（
+      <strong>{{ status.target_chapters ?? '—' }}</strong> 章 ×
+      <strong>{{ status.target_words_per_chapter ?? 2500 }}</strong> 字/章）。全托管写满目标章即停；节拍拆分按「每章字数」执行。
+    </p>
+
     <!-- 数据格 -->
     <div class="ap-grid">
       <div class="ap-cell">
@@ -30,8 +37,11 @@
         <div class="value">{{ formatWords(status?.total_words) }}</div>
       </div>
       <div class="ap-cell">
-        <div class="label">当前幕 / 节拍</div>
+        <div class="label">当前章 / 幕 / 节拍</div>
         <div class="value">
+          <template v-if="status?.current_chapter_number != null && isWriting">
+            第 {{ status.current_chapter_number }} 章 ·
+          </template>
           第 {{ (status?.current_act || 0) + 1 }} 幕
           <span v-if="isWriting">· {{ beatLabel }}</span>
         </div>
@@ -73,14 +83,12 @@
       宏观规划完成后会停一次；之后每一幕<strong>仅在首次生成该幕章节规划</strong>时再停一次，不会无限循环。
     </n-alert>
 
-    <!-- 实时日志流 -->
-    <RealtimeLogStream
+    <!-- 仅流式正文预览（与监控大盘终端日志分离，避免双 SSE 卡顿） -->
+    <AutopilotWritingStream
       v-if="isRunning"
-      :novel-id="novelId"
       :writing-content="writingContent"
       :writing-chapter-number="writingChapterNumber"
       :writing-beat-index="writingBeatIndex"
-      @desk-refresh="emit('desk-refresh')"
     />
 
     <!-- 操作按钮 -->
@@ -100,20 +108,34 @@
     <n-modal v-model:show="showStartModal" title="启动全托管" preset="dialog" positive-text="启动" @positive-click="start">
       <n-space vertical :size="12" style="width: 100%">
         <n-alert type="success" :show-icon="true" style="font-size: 12px">
-          <strong>自动托管</strong>：守护进程已在后端自动启动，配置好<strong>预计总章数</strong>和<strong>当次计划参数</strong>后点击"启动"即可开始自动写作。
-        </n-alert>
-        <n-alert type="info" :show-icon="false" style="font-size: 12px">
-          目标章节数沿用项目当前配置。这里仅配置本次托管启动参数，避免重复维护同一套目标。
+          <strong>自动托管</strong>：守护进程已在后端自动启动，配置好参数后点击"启动"即可开始自动写作。
         </n-alert>
         <n-form>
+          <!-- 目标章数（可编辑） -->
           <n-form-item label="目标章数">
-            <n-input :value="targetChapterSummary" readonly />
+            <n-input-number 
+              v-model:value="startConfig.target_chapters"
+              :min="1"
+              :max="9999"
+              :step="10"
+              style="width: 100%"
+              @update:value="updateProtectionLimit"
+            />
+          </n-form-item>
+          <n-form-item label="每章目标字数">
+            <n-input-number
+              v-model:value="startConfig.target_words_per_chapter"
+              :min="500"
+              :max="10000"
+              :step="500"
+              style="width: 100%"
+            />
           </n-form-item>
           <!-- 保护上限 -->
-          <n-form-item label="当次计划上限（本次最多先写到第几章）">
+          <n-form-item label="保护上限（章节数，防止意外消耗）">
             <n-input-number 
               v-model:value="startConfig.max_auto_chapters" 
-              :min="targetChapters"
+              :min="startConfig.target_chapters"
               :max="9999"
               :step="10"
               style="width: 100%"
@@ -123,7 +145,7 @@
           <!-- 全自动模式开关 -->
           <n-form-item label="全自动模式">
             <n-space align="center" justify="space-between" style="width: 100%">
-              <n-switch
+              <n-switch 
                 v-model:value="startConfig.auto_approve_mode"
                 :round="false"
               >
@@ -135,128 +157,18 @@
               </n-text>
             </n-space>
           </n-form-item>
-
-          <!-- 专项题材 Agent 开关 -->
-          <n-form-item label="专项题材增强">
-            <n-space align="center" justify="space-between" style="width: 100%">
-              <n-switch
-                v-model:value="startConfig.theme_agent_enabled"
-                :round="false"
-                :disabled="!currentGenre"
-              >
-                <template #checked>开启</template>
-                <template #unchecked>关闭</template>
-              </n-switch>
-              <n-text depth="3" style="font-size: 12px">
-                {{ currentGenre ? `启用「${currentGenreLabel}」题材专项写作能力` : '请先在顶栏选择题材' }}
-              </n-text>
-            </n-space>
-          </n-form-item>
-
-          <!-- 增强技能选择（仅在题材 Agent 开启时显示） -->
-          <n-form-item v-if="startConfig.theme_agent_enabled && currentGenre" label="增强技能">
-            <n-space vertical :size="8" style="width: 100%">
-              <n-spin :show="loadingSkills" size="small">
-                <template v-if="availableSkills.length > 0">
-                  <n-checkbox-group v-model:value="startConfig.enabled_theme_skills">
-                    <n-space vertical :size="4">
-                      <div v-for="skill in availableSkills" :key="skill.key" class="skill-item">
-                        <n-checkbox :value="skill.key">
-                          <n-text>{{ skill.name }}</n-text>
-                          <n-tag v-if="skill.source === 'custom'" size="tiny" type="info" style="margin-left: 4px">自定义</n-tag>
-                          <n-text v-if="skill.description" depth="3" style="font-size: 11px; margin-left: 4px">
-                            — {{ skill.description }}
-                          </n-text>
-                        </n-checkbox>
-                        <n-space v-if="skill.source === 'custom'" :size="4" style="margin-left: 4px">
-                          <n-button text size="tiny" type="primary" @click.stop="openEditSkill(skill)">编辑</n-button>
-                          <n-button text size="tiny" type="error" @click.stop="deleteCustomSkill(skill)">删除</n-button>
-                        </n-space>
-                      </div>
-                    </n-space>
-                  </n-checkbox-group>
-                </template>
-                <template v-else-if="!loadingSkills">
-                  <n-text depth="3" style="font-size: 12px">
-                    当前题材暂无可用增强技能，可点击下方按钮创建自定义技能
-                  </n-text>
-                </template>
-              </n-spin>
-
-              <!-- 新增自定义技能按钮 -->
-              <n-button size="small" dashed type="primary" style="width: 100%" @click="openCreateSkill">
-                + 新增自定义技能
-              </n-button>
-            </n-space>
-          </n-form-item>
-
-          <!-- 自定义技能创建/编辑弹窗 -->
-          <n-modal
-            v-model:show="showSkillEditor"
-            :title="editingSkillId ? '编辑自定义技能' : '新增自定义技能'"
-            preset="dialog"
-            positive-text="保存"
-            negative-text="取消"
-            style="width: 560px"
-            @positive-click="saveCustomSkill"
-          >
-            <n-space vertical :size="12" style="width: 100%">
-              <n-alert type="info" :show-icon="false" style="font-size: 11px">
-                自定义技能让你用自然语言定义写作规则，系统会在生成每章时自动注入这些指令。
-              </n-alert>
-              <n-form label-placement="top" :show-feedback="false">
-                <n-form-item label="技能名称" required>
-                  <n-input v-model:value="skillForm.skill_name" placeholder="如：宠物描写增强、职场术语规范" maxlength="50" show-count />
-                </n-form-item>
-                <n-form-item label="技能说明">
-                  <n-input v-model:value="skillForm.skill_description" placeholder="简要说明这个技能做什么" maxlength="200" show-count />
-                </n-form-item>
-                <n-form-item label="上下文提示词">
-                  <n-input
-                    v-model:value="skillForm.context_prompt"
-                    type="textarea"
-                    :rows="3"
-                    placeholder="每章生成时注入到写作上下文中的指令。例如：&#10;1. 主角的猫必须在每章出现至少一次&#10;2. 描写猫时要体现猫的傲娇性格"
-                  />
-                </n-form-item>
-                <n-form-item label="节拍提示词">
-                  <n-input
-                    v-model:value="skillForm.beat_prompt"
-                    type="textarea"
-                    :rows="2"
-                    placeholder="每个节拍（段落）生成时注入的指令。例如：&#10;对话场景中角色说话方式要有区分度"
-                  />
-                </n-form-item>
-                <n-form-item label="节拍触发关键词">
-                  <n-input
-                    v-model:value="skillForm.beat_triggers"
-                    placeholder="逗号分隔，为空则对所有节拍生效。如：战斗,对决,交锋"
-                  />
-                </n-form-item>
-                <n-form-item label="审计检查项">
-                  <n-dynamic-input
-                    v-model:value="skillForm.audit_checks"
-                    placeholder="每章写完后的审计检查点。如：检查主角的猫是否出场"
-                  />
-                </n-form-item>
-              </n-form>
-            </n-space>
-          </n-modal>
           
           <n-alert type="info" :show-icon="false" style="font-size: 11px; margin-top: -8px">
             <template v-if="startConfig.auto_approve_mode">
               <strong>全自动模式已开启</strong>：系统将跳过所有审阅环节，自动运行直到写完。
             </template>
             <template v-else>
-              达到 <strong>{{ targetChapters }} 章</strong> 目标时自动完成全书；保护上限建议至少为 <strong>目标 + 20</strong>。
-            </template>
-            <template v-if="startConfig.theme_agent_enabled && currentGenre">
-              <br/>🎯 <strong>专项题材增强已开启</strong>：将使用「{{ currentGenreLabel }}」题材的专项写作能力（人设、节拍、规则）。
-              <template v-if="startConfig.enabled_theme_skills && startConfig.enabled_theme_skills.length > 0">
-                <br/>🧩 已选 <strong>{{ startConfig.enabled_theme_skills.length }}</strong> 个增强技能。
-              </template>
+              达到 <strong>{{ startConfig.target_chapters }} 章</strong> 目标时自动完成全书；保护上限已自动设置为 <strong>目标 + 20</strong>。
             </template>
           </n-alert>
+          <n-text depth="3" style="font-size: 11px; line-height: 1.5; display: block; margin-top: 4px">
+            目标章数与每章字数与首页「目标篇幅」同一套落库字段（PUT /novels），可在此微调后再启动；节拍拆分与上方进度说明一致。
+          </n-text>
         </n-form>
       </n-space>
     </n-modal>
@@ -266,80 +178,38 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import RealtimeLogStream from './RealtimeLogStream.vue'
-import { subscribeChapterStream } from '../../api/config'
-import { novelApi } from '../../api/novel'
+import AutopilotWritingStream from './AutopilotWritingStream.vue'
+import { resolveHttpUrl, subscribeChapterStream } from '../../api/config'
 
 const props = defineProps({ novelId: String })
-const emit = defineEmits(['status-change', 'desk-refresh', 'chapter-content-update', 'chapter-start', 'chapter-chunk'])
+const emit = defineEmits(['status-change', 'chapter-content-update', 'chapter-start', 'chapter-chunk'])
 const message = useMessage()
 
 const status = ref(null)
 const toggling = ref(false)
 const showStartModal = ref(false)
-const startConfig = ref({
+const startConfig = ref({ 
+  target_chapters: 100,
+  target_words_per_chapter: 2500,
   max_auto_chapters: 120,
-  auto_approve_mode: false,
-  theme_agent_enabled: false,
-  enabled_theme_skills: []
-})
-
-// 增强技能状态
-const availableSkills = ref([])
-const loadingSkills = ref(false)
-
-// 自定义技能编辑器状态
-const showSkillEditor = ref(false)
-const editingSkillId = ref(null)
-const skillForm = ref({
-  skill_name: '',
-  skill_description: '',
-  context_prompt: '',
-  beat_prompt: '',
-  beat_triggers: '',
-  audit_checks: [],
+  auto_approve_mode: false
 })
 
 // 目标章数（从 status 获取）
 const targetChapters = computed(() => status.value?.target_chapters || 100)
-const targetChapterSummary = computed(() => `当前项目目标 ${targetChapters.value} 章`)
 
-// 题材信息（用于专项题材 Agent 开关的描述文案）
-const genreMap = {
-  xuanhuan: '玄幻', dushi: '都市', scifi: '科幻', history: '历史',
-  wuxia: '武侠', xianxia: '仙侠', fantasy: '奇幻', game: '游戏',
-  suspense: '悬疑', romance: '言情', other: '其他'
-}
-const currentGenre = computed(() => status.value?.genre || '')
-const currentGenreLabel = computed(() => genreMap[currentGenre.value] || currentGenre.value || '')
-
-async function fetchAvailableSkills() {
-  if (!props.novelId || !currentGenre.value) {
-    availableSkills.value = []
-    return
+/** 与后端 target_plan_total_words 一致；旧接口无该字段时本地推算 */
+const planTotalWordsHint = computed(() => {
+  const s = status.value
+  if (!s) return 0
+  if (s.target_plan_total_words != null && s.target_plan_total_words > 0) {
+    return s.target_plan_total_words
   }
-  loadingSkills.value = true
-  try {
-    const data = await novelApi.getAvailableThemeSkills(props.novelId)
-    availableSkills.value = data.available_skills || []
-    if (startConfig.value.enabled_theme_skills.length === 0 && availableSkills.value.length > 0) {
-      startConfig.value.enabled_theme_skills = availableSkills.value.map(s => s.key)
-    }
-  } catch (e) {
-    console.error('Failed to fetch available skills:', e)
-  } finally {
-    loadingSkills.value = false
-  }
-}
-
-watch(
-  () => startConfig.value.theme_agent_enabled,
-  (enabled) => {
-    if (enabled && currentGenre.value) fetchAvailableSkills()
-    else availableSkills.value = []
-  }
-)
-/** HTTP/1.1 下同域长连接约 6 路；避免与日志 /stream 双开占满导致其它 API 挂起 */
+  const tc = s.target_chapters ?? 0
+  const tw = s.target_words_per_chapter ?? 2500
+  return tc * tw
+})
+/** 驾驶舱仅保留章节内容流；全量日志在监控大盘终端（单 /stream） */
 let statusPollTimer = null
 /** novel_id 在库中不存在(404)时不再轮询，避免旧标签页/错 slug 刷屏访问日志 */
 const statusPollDisabled = ref(false)
@@ -392,9 +262,11 @@ const stageTagClass = computed(() => ({
   'tag-idle':    !isRunning.value && !needsReview.value,
 }))
 
+/** 与守护进程一致：current_beat_index 为 0-based「下一节拍索引」，展示为 1-based 与 /autopilot/stream 日志对齐 */
 const beatLabel = computed(() => {
-  const b = status.value?.current_beat_index || 0
-  return b === 0 ? '准备' : `节拍 ${b}`
+  if (!isWriting.value) return ''
+  const b = status.value?.current_beat_index ?? 0
+  return `节拍 ${Number(b) + 1}`
 })
 
 const tensionLabel = computed(() => {
@@ -415,11 +287,11 @@ function formatWords(n) {
   return n >= 10000 ? `${(n / 10000).toFixed(1)}万` : String(n)
 }
 
-// API 调用
-const base = () => `/api/v1/autopilot/${props.novelId}`
+// API 调用（路径须经 resolveHttpUrl，桌面壳下不能用相对 /api）
+const autopilotApiRoot = () => `/api/v1/autopilot/${props.novelId}`
 
 async function fetchStatus() {
-  const res = await fetch(`${base()}/status`)
+  const res = await fetch(resolveHttpUrl(`${autopilotApiRoot()}/status`))
   if (res.status === 404) {
     clearStatusPoll()
     status.value = null
@@ -460,80 +332,86 @@ watch(
 )
 
 function openStartModal() {
-  // 打开弹窗时，从当前状态初始化设置
+  // 打开弹窗时，从当前状态初始化设置（与 GET /autopilot/.../status 一致）
   const target = status.value?.target_chapters || 100
+  const wpc = status.value?.target_words_per_chapter ?? 2500
   const autoApprove = status.value?.auto_approve_mode ?? false
-  const themeEnabled = status.value?.theme_agent_enabled ?? false
-  const enabledSkills = status.value?.enabled_theme_skills || []
   startConfig.value = {
+    target_chapters: target,
+    target_words_per_chapter: wpc,
     max_auto_chapters: target + 20,
-    auto_approve_mode: autoApprove,
-    theme_agent_enabled: themeEnabled,
-    enabled_theme_skills: [...enabledSkills]
+    auto_approve_mode: autoApprove
   }
   showStartModal.value = true
-  // 如果题材增强已开启，立即加载技能列表
-  if (themeEnabled && currentGenre.value) {
-    fetchAvailableSkills()
+}
+
+function updateProtectionLimit() {
+  // 当目标章数改变时，自动调整保护上限
+  const target = startConfig.value.target_chapters
+  if (startConfig.value.max_auto_chapters < target + 20) {
+    startConfig.value.max_auto_chapters = target + 20
   }
 }
 
 async function start() {
   toggling.value = true
   try {
+    const currentTarget = status.value?.target_chapters
+    const newTarget = startConfig.value.target_chapters
+    const currentWpc = status.value?.target_words_per_chapter ?? 2500
+    const newWpc = startConfig.value.target_words_per_chapter
     const currentAutoApprove = status.value?.auto_approve_mode ?? false
     const newAutoApprove = startConfig.value.auto_approve_mode
 
+    const novelPatch = {}
+    if (currentTarget !== newTarget) {
+      novelPatch.target_chapters = newTarget
+    }
+    if (currentWpc !== newWpc) {
+      novelPatch.target_words_per_chapter = newWpc
+    }
+
+    if (Object.keys(novelPatch).length > 0) {
+      const updateRes = await fetch(resolveHttpUrl(`/api/v1/novels/${props.novelId}`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(novelPatch),
+        },
+      )
+      if (!updateRes.ok) {
+        message.error('更新书目目标章数或每章字数失败')
+        return
+      }
+    }
+
     if (currentAutoApprove !== newAutoApprove) {
-      try {
-        await novelApi.updateAutoApproveMode(props.novelId, newAutoApprove)
-      } catch {
+      const approveRes = await fetch(
+        resolveHttpUrl(`/api/v1/novels/${props.novelId}/auto-approve-mode`),
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            auto_approve_mode: newAutoApprove,
+          }),
+        },
+      )
+      if (!approveRes.ok) {
         message.error('更新全自动模式失败')
         return
       }
     }
-
-    // 更新专项题材 Agent 开关
-    const currentThemeEnabled = status.value?.theme_agent_enabled ?? false
-    const newThemeEnabled = startConfig.value.theme_agent_enabled
-    if (currentThemeEnabled !== newThemeEnabled) {
-      try {
-        await novelApi.updateThemeAgentEnabled(props.novelId, newThemeEnabled)
-      } catch {
-        message.error('更新专项题材设置失败')
-        return
-      }
-    }
-
-    // 更新增强技能列表
-    if (newThemeEnabled) {
-      const currentSkills = status.value?.enabled_theme_skills || []
-      const newSkills = startConfig.value.enabled_theme_skills || []
-      const skillsChanged = JSON.stringify(currentSkills.sort()) !== JSON.stringify([...newSkills].sort())
-      if (skillsChanged) {
-        try {
-          await novelApi.updateEnabledThemeSkills(props.novelId, newSkills)
-        } catch {
-          message.error('更新增强技能失败')
-          return
-        }
-      }
-    }
-
+    
     // 然后启动自动驾驶
-    const res = await fetch(`${base()}/start`, {
+    const res = await fetch(resolveHttpUrl(`${autopilotApiRoot()}/start`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        max_auto_chapters: startConfig.value.max_auto_chapters
-      })
+        max_auto_chapters: startConfig.value.max_auto_chapters,
+      }),
     })
     if (res.ok) {
       const modeText = startConfig.value.auto_approve_mode ? '（全自动模式）' : ''
-      const themeText = startConfig.value.theme_agent_enabled && currentGenre.value ? `（${currentGenreLabel.value}题材增强）` : ''
-      const skillCount = startConfig.value.enabled_theme_skills?.length || 0
-      const skillText = startConfig.value.theme_agent_enabled && skillCount > 0 ? `（${skillCount}个增强技能）` : ''
-      message.success(`自动驾驶已启动${modeText}${themeText}${skillText}`)
+      message.success(`自动驾驶已启动${modeText}`)
     }
     else message.error('启动失败')
     await fetchStatus()
@@ -544,7 +422,9 @@ async function start() {
 
 async function stop() {
   toggling.value = true
-  await fetch(`${base()}/stop`, { method: 'POST' })
+  await fetch(resolveHttpUrl(`${autopilotApiRoot()}/stop`), {
+    method: 'POST',
+  })
   message.info('已停止')
   await fetchStatus()
   toggling.value = false
@@ -552,7 +432,9 @@ async function stop() {
 
 async function resume() {
   toggling.value = true
-  const res = await fetch(`${base()}/resume`, { method: 'POST' })
+  const res = await fetch(resolveHttpUrl(`${autopilotApiRoot()}/resume`), {
+    method: 'POST',
+  })
   if (res.ok) message.success('已确认大纲，开始写作')
   else { const e = await res.json(); message.error(e.detail || '恢复失败') }
   await fetchStatus()
@@ -562,7 +444,10 @@ async function resume() {
 async function clearCircuitBreaker() {
   toggling.value = true
   try {
-    const res = await fetch(`${base()}/circuit-breaker/reset`, { method: 'POST' })
+    const res = await fetch(
+      resolveHttpUrl(`${autopilotApiRoot()}/circuit-breaker/reset`),
+      { method: 'POST' },
+    )
     if (res.ok) {
       message.success('已解除挂起并清零失败计数，可重新启动全托管')
       await fetchStatus()
@@ -577,7 +462,7 @@ async function clearCircuitBreaker() {
 // 章节内容流订阅（用于推送内容到编辑框）
 let chapterStreamCtrl = null
 
-// 写作内容状态（传递给 RealtimeLogStream 显示）
+// 写作内容状态（传递给 AutopilotWritingStream）
 const writingContent = ref('')
 const writingChapterNumber = ref(0)
 const writingBeatIndex = ref(0)
@@ -739,6 +624,18 @@ onUnmounted(() => {
   color: #999;
 }
 
+.ap-plan-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--app-text-secondary, #64748b);
+}
+
+.ap-plan-hint strong {
+  color: var(--app-text-primary, #111827);
+  font-weight: 600;
+}
+
 .ap-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -791,17 +688,5 @@ onUnmounted(() => {
   font-size: 11px;
   opacity: 0.95;
   margin-bottom: 8px !important;
-}
-
-.skill-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 2px 0;
-}
-
-.skill-item:hover {
-  background: rgba(24, 160, 88, 0.04);
-  border-radius: 4px;
 }
 </style>

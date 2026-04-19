@@ -45,8 +45,7 @@ def _foreshadow_entry_dict(entry) -> Dict[str, Any]:
         "id": entry.id,
         "chapter": entry.chapter,
         "character_id": entry.character_id,
-        "hidden_clue": entry.hidden_clue,
-        "sensory_anchors": dict(entry.sensory_anchors or {}),
+        "question": entry.question,
         "status": entry.status,
         "consumed_at_chapter": entry.consumed_at_chapter,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
@@ -64,12 +63,7 @@ def _knowledge_dict(knowledge) -> Dict[str, Any]:
                 "key_events": ch.key_events,
                 "open_threads": ch.open_threads,
                 "consistency_note": ch.consistency_note,
-                "ending_state": getattr(ch, "ending_state", "") or "",
-                "ending_emotion": getattr(ch, "ending_emotion", "") or "",
-                "carry_over_question": getattr(ch, "carry_over_question", "") or "",
-                "next_opening_hint": getattr(ch, "next_opening_hint", "") or "",
                 "beat_sections": list(ch.beat_sections or []),
-                "micro_beats": list(ch.micro_beats or []),
                 "sync_status": ch.sync_status,
             }
             for ch in knowledge.chapters

@@ -4,8 +4,36 @@
   </div>
   <div v-else-if="error" class="stats-top-bar error">
     <span>{{ error }}</span>
+    <n-button size="small" secondary style="margin-left: 12px" @click="retryLoad">重试</n-button>
   </div>
   <div v-else class="stats-top-bar">
+    <!-- 左侧：AI 工具统一入口（隐藏原始按钮，通过 ref 触发） -->
+    <div class="topbar-left">
+      <!-- 隐藏的原始组件，仅用于保留其 drawer/modal 功能 -->
+      <div class="ai-hidden-entries" aria-hidden="true">
+        <GlobalLLMEntryButton ref="llmRef" appearance="topbar" />
+        <PromptPlazaEntryButton ref="plazaRef" appearance="topbar" />
+      </div>
+
+      <!-- 可见的统一触发按钮 -->
+      <n-dropdown
+        trigger="click"
+        placement="bottom-start"
+        :options="aiToolsOptions"
+        @select="handleAiToolSelect"
+      >
+        <div class="ai-tools-trigger" role="button" aria-label="AI 工具">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16">
+            <path fill="currentColor" d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1v2h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2v-2h1a7 7 0 0 1 7-7h1V5.73A2 2 0 0 1 10 4a2 2 0 0 1 2-2m0 2a.5.5 0 0 0 0 1 .5.5 0 0 0 0-1M7.5 13a5 5 0 0 0-4.95 4.5H21.45A5 5 0 0 0 16.5 13h-9M9 18v1h2v-1H9m4 0v1h2v-1h-2z"/>
+          </svg>
+          <span class="ai-tools-label">AI 工具</span>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="12" height="12">
+            <path fill="currentColor" d="M7 10l5 5 5-5z"/>
+          </svg>
+        </div>
+      </n-dropdown>
+    </div>
+
     <!-- 中间：统计数据 -->
     <div class="topbar-center">
       <div
@@ -29,24 +57,6 @@
 
     <!-- 右侧：操作按钮 -->
     <div class="top-bar-actions">
-      <!-- 题材选择 -->
-      <n-popselect
-        v-model:value="selectedGenre"
-        :options="genreOptions"
-        trigger="click"
-        @update:value="handleGenreChange"
-      >
-        <n-tag
-          :bordered="false"
-          size="small"
-          class="genre-tag"
-          :type="selectedGenre ? 'info' : 'default'"
-          style="cursor: pointer"
-        >
-          {{ selectedGenre ? genreLabel : '选择题材' }}
-        </n-tag>
-      </n-popselect>
-
       <!-- 导出按钮 -->
       <n-dropdown 
         trigger="click" 
@@ -72,13 +82,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
-import { NTooltip, NSpin, NDropdown, NPopselect, NTag, useMessage } from 'naive-ui'
+import { computed, onMounted, ref } from 'vue'
+import { NTooltip, NSpin, NDropdown, NButton, useMessage } from 'naive-ui'
 import { useStatsStore } from '@/stores/statsStore'
 import { novelApi } from '@/api/novel'
-
-const GlobalLLMEntryButton = defineAsyncComponent(() => import('@/components/global/GlobalLLMEntryButton.vue'))
-const PromptPlazaEntryButton = defineAsyncComponent(() => import('@/components/global/PromptPlazaEntryButton.vue'))
+import GlobalLLMEntryButton from '@/components/global/GlobalLLMEntryButton.vue'
+import PromptPlazaEntryButton from '@/components/global/PromptPlazaEntryButton.vue'
 
 const props = defineProps<{
   slug: string
@@ -90,44 +99,20 @@ defineEmits<{
 
 const message = useMessage()
 
-// 题材选择
-const genreOptions = [
-  { label: '不限', value: '' },
-  { label: '玄幻', value: 'xuanhuan' },
-  { label: '都市', value: 'dushi' },
-  { label: '科幻', value: 'scifi' },
-  { label: '历史', value: 'history' },
-  { label: '武侠', value: 'wuxia' },
-  { label: '仙侠', value: 'xianxia' },
-  { label: '奇幻', value: 'fantasy' },
-  { label: '游戏', value: 'game' },
-  { label: '悬疑', value: 'suspense' },
-  { label: '言情', value: 'romance' },
-  { label: '其他', value: 'other' },
+// AI 工具组件引用（用于以编程方式触发各组件内部按钮）
+const llmRef = ref<{ $el: HTMLElement } | null>(null)
+const plazaRef = ref<{ $el: HTMLElement } | null>(null)
+
+const aiToolsOptions = [
+  { label: '⚙️ AI 控制台', key: 'llm' },
+  { label: '✦ 提示词广场', key: 'plaza' },
 ]
 
-const selectedGenre = ref('')
-
-const genreLabel = computed(() => {
-  const opt = genreOptions.find(o => o.value === selectedGenre.value)
-  return opt ? opt.label : '选择题材'
-})
-
-async function loadGenre() {
-  try {
-    const novel = await novelApi.getNovel(props.slug)
-    selectedGenre.value = novel.genre || ''
-  } catch {
-    // ignore
-  }
-}
-
-async function handleGenreChange(value: string) {
-  try {
-    await novelApi.updateNovel(props.slug, { genre: value })
-    message.success(value ? `题材已设为「${genreLabel.value}」` : '已清除题材设置')
-  } catch {
-    message.error('题材更新失败')
+function handleAiToolSelect(key: string) {
+  if (key === 'llm') {
+    llmRef.value?.$el?.querySelector('button')?.click()
+  } else if (key === 'plaza') {
+    plazaRef.value?.$el?.querySelector('button')?.click()
   }
 }
 
@@ -189,10 +174,8 @@ const stats = computed(() => {
   const formattedWords = totalWords.toLocaleString()
   const formattedCompletionRate = rate.toFixed(DECIMAL_PRECISION)
   const formattedAvgWords = avgWords.toLocaleString()
-  const quality = s.generation_quality
-  const passRate = quality?.pass_rate != null ? `${(quality.pass_rate * 100).toFixed(DECIMAL_PRECISION)}%` : null
 
-  const items = [
+  return [
     {
       key: 'words',
       label: '总字数',
@@ -217,25 +200,13 @@ const stats = computed(() => {
       value: formattedAvgWords,
       tooltip: `每章平均 ${formattedAvgWords} 字`
     },
-  ]
-
-  if (passRate) {
-    items.push({
-      key: 'word-control-pass-rate',
-      label: '达标率',
-      value: passRate,
-      tooltip: `章节字数落在目标容忍区间的比例。补写触发 ${quality?.expansion_trigger_count ?? 0} 次，裁剪触发 ${quality?.trim_trigger_count ?? 0} 次`
-    })
-  }
-
-  items.push({
+    {
       key: 'updated',
       label: '最后更新',
       value: formatDate(s.last_updated),
       tooltip: `最后更新时间：${s.last_updated}`
-    })
-
-  return items
+    }
+  ]
 })
 
 function formatStatsError(err: unknown): string {
@@ -275,21 +246,24 @@ function formatDate(dateStr: string | undefined): string {
   }
 }
 
-onMounted(async () => {
+async function loadStats() {
   loading.value = true
   error.value = null
   try {
-    await Promise.all([
-      statsStore.loadBookStats(props.slug),
-      loadGenre(),
-    ])
+    await statsStore.loadBookStats(props.slug)
   } catch (err) {
     console.error('Failed to load book stats:', err)
     error.value = `加载统计数据失败：${formatStatsError(err)}`
   } finally {
     loading.value = false
   }
-})
+}
+
+async function retryLoad() {
+  await loadStats()
+}
+
+onMounted(loadStats)
 </script>
 
 <style scoped>
@@ -301,27 +275,86 @@ onMounted(async () => {
   height: 64px;
   background: var(--stats-bar-gradient);
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  color: var(--app-text-inverse);
+  color: var(--nav-hero-text, #ffffff);
   position: relative;
   gap: 16px;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
   box-shadow:
     var(--app-shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.08)),
     0 4px 16px var(--color-brand-border, rgba(79, 70, 229, 0.08));
 }
 
+/* 左侧：AI 控制台入口 */
+.topbar-left {
+  flex-shrink: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 隐藏的 AI 入口组件（仅保留功能，不参与布局） */
+.ai-hidden-entries {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  top: -9999px;
+}
+
+/* 统一 AI 工具触发按钮 */
+.ai-tools-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--app-radius-md);
+  cursor: pointer;
+  background: var(--nav-hero-pill-bg-top, rgba(255, 255, 255, 0.16));
+  border: 1px solid var(--nav-hero-pill-border, rgba(255, 255, 255, 0.28));
+  color: var(--nav-hero-text, #ffffff);
+  transition: all var(--app-transition);
+  white-space: nowrap;
+  box-shadow: var(--nav-hero-shadow);
+  user-select: none;
+}
+
+.ai-tools-trigger:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.ai-tools-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 /* 中间：统计数据 */
 .topbar-center {
   flex: 1;
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
   gap: 4px;
   min-width: 0;
   z-index: 1;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .stats-top-bar.loading,
@@ -335,7 +368,7 @@ onMounted(async () => {
 }
 
 .stat-item {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   text-align: center;
   cursor: help;
   padding: 4px 10px;
@@ -344,7 +377,7 @@ onMounted(async () => {
 }
 
 .stat-item:hover {
-  background: var(--app-text-inverse, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .stat-content {
@@ -355,12 +388,12 @@ onMounted(async () => {
 }
 
 .stat-label {
-  font-size: 11.5px;
-  opacity: 0.8;
+  font-size: 12px;
+  opacity: 0.92;
   font-weight: 600;
   letter-spacing: 0.03em;
   white-space: nowrap;
-  color: inherit;
+  color: var(--nav-hero-text-muted, rgba(255, 255, 255, 0.86));
 }
 
 .stat-value {
@@ -368,8 +401,8 @@ onMounted(async () => {
   font-weight: 800;
   letter-spacing: -0.02em;
   line-height: 1.2;
-  color: inherit;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  color: var(--nav-hero-text, #ffffff);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 .stat-item:hover .stat-value {
@@ -380,14 +413,11 @@ onMounted(async () => {
 /* 右侧：操作按钮 */
 .top-bar-actions {
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   gap: 8px;
   flex: 0 0 auto;
   align-items: center;
-}
-
-.genre-tag {
-  font-size: 12px;
-  transition: all 0.18s ease;
 }
 
 .action-trigger {
@@ -405,7 +435,7 @@ onMounted(async () => {
 
 .action-trigger:hover {
   opacity: 1;
-  background: var(--app-text-inverse, rgba(255, 255, 255, 0.15));
+  background: rgba(255, 255, 255, 0.16);
   transform: rotate(45deg);
 }
 
@@ -426,7 +456,7 @@ onMounted(async () => {
 
 .settings-trigger:hover {
   opacity: 1;
-  background: var(--app-text-inverse, rgba(255, 255, 255, 0.15));
+  background: rgba(255, 255, 255, 0.16);
   transform: rotate(45deg);
 }
 
@@ -437,33 +467,41 @@ onMounted(async () => {
 
 /* Accessibility: Focus styles */
 .stat-item:focus-within {
-  outline: 2px solid var(--app-text-inverse, rgba(255, 255, 255, 0.5));
+  outline: 2px solid rgba(255, 255, 255, 0.55);
   outline-offset: 4px;
   border-radius: 4px;
 }
 
 .settings-trigger:focus-visible {
-  outline: 2px solid var(--app-text-inverse, rgba(255, 255, 255, 0.5));
+  outline: 2px solid rgba(255, 255, 255, 0.55);
   outline-offset: 2px;
 }
 
-/* Responsive design */
+/* Responsive design — 全程单行横向，窄屏可横向滚动 */
 @media (max-width: 900px) {
   .stats-top-bar {
-    height: auto;
-    flex-wrap: wrap;
-    padding: 12px 16px;
-    gap: 10px;
+    height: 56px;
+    flex-wrap: nowrap;
+    padding: 8px 12px;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .topbar-left {
+    flex-shrink: 0;
+  }
+
+  .topbar-left :deep(.global-llm-main.variant-topbar),
+  .topbar-left :deep(.plaza-main.variant-topbar) {
+    min-height: 42px;
+    padding: 6px 10px;
   }
 
   .topbar-center {
-    width: 100%;
-    justify-content: space-around;
-    order: 1;
-  }
-
-  .stat-item {
-    flex: 1;
+    justify-content: flex-end;
+    flex: 1 1 auto;
   }
 
   .stat-value {
@@ -471,14 +509,12 @@ onMounted(async () => {
   }
 
   .settings-trigger {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
+    position: static;
+    transform: none;
   }
 
   .settings-trigger:hover {
-    transform: translateY(-50%) rotate(45deg);
+    transform: rotate(45deg);
   }
 }
 
@@ -492,7 +528,7 @@ onMounted(async () => {
   }
 
   .stat-label {
-    font-size: 10px;
+    font-size: 12px;
   }
 }
 </style>

@@ -420,7 +420,7 @@ class HubWindow(BaseWindow):
 
         if needs_install:
             self.log("开始安装核心依赖（轻量级，约 1~3 分钟）...", "title")
-            self.log("仅包含 FastAPI / OpenAI / Qdrant 等核心组件", "dim")
+            self.log("仅包含 FastAPI / OpenAI 等核心组件", "dim")
             if not self._installer.install():
                 self._show_fatal_simple(
                     "核心依赖安装失败",
@@ -647,7 +647,7 @@ class HubWindow(BaseWindow):
     def _show_fatal_error(self, exc, tb_text):
         """致命错误弹窗——显示 traceback"""
         def _do():
-            popup = show_popup(
+            show_popup(
                 self.root, "PlotPilot 发生异常",
                 f"异常类型: {type(exc).__name__}\n\n{str(exc)[:200]}",
                 width=520, height=400, color=ERR_C, icon="✘",

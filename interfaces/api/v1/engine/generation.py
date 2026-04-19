@@ -30,13 +30,52 @@ from interfaces.api.dependencies import (
     get_auto_bible_generator,
     get_auto_knowledge_generator,
     get_setup_main_plot_suggestion_service,
-    get_continuous_planning_service,
 )
+# from application.services.story_structure_ai_service import StoryStructureAIService  # 已废弃，使用 ContinuousPlanningService
 from application.blueprint.services.continuous_planning_service import ContinuousPlanningService
+from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
+from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+from application.paths import DATA_DIR
 from application.world.services.auto_bible_generator import AutoBibleGenerator
 from application.world.services.auto_knowledge_generator import AutoKnowledgeGenerator
 
 router = APIRouter(prefix="/novels", tags=["generation"])
+
+
+# 已废弃：StoryStructureAIService 已被 ContinuousPlanningService 替代
+# def get_structure_ai_service() -> StoryStructureAIService:
+#     """获取叙事结构 AI 服务"""
+#     db_path = str(DATA_DIR / "aitext.db")
+#     repository = StoryNodeRepository(db_path)
+#
+#     from application.world.services.bible_service import BibleService
+#     from interfaces.api.dependencies import get_bible_repository
+#
+#     bible_service = BibleService(get_bible_repository())
+#
+#     return StoryStructureAIService(repository, llm_service=None, bible_service=bible_service)
+
+
+def get_continuous_planning_service() -> ContinuousPlanningService:
+    """获取持续规划服务"""
+    db_path = str(DATA_DIR / "aitext.db")
+    story_node_repo = StoryNodeRepository(db_path)
+    chapter_element_repo = ChapterElementRepository(db_path)
+
+    from application.world.services.bible_service import BibleService
+    from interfaces.api.dependencies import get_bible_repository, get_llm_service, get_chapter_repository
+
+    bible_service = BibleService(get_bible_repository())
+    llm_service = get_llm_service()
+    chapter_repository = get_chapter_repository()
+
+    return ContinuousPlanningService(
+        story_node_repo=story_node_repo,
+        chapter_element_repo=chapter_element_repo,
+        llm_service=llm_service,
+        bible_service=bible_service,
+        chapter_repository=chapter_repository
+    )
 
 
 # Request/Response Models
@@ -44,7 +83,6 @@ class GenerateChapterRequest(BaseModel):
     """生成章节请求"""
     chapter_number: int = Field(..., gt=0, description="章节号（必须 > 0）")
     outline: str = Field(..., min_length=1, description="章节大纲")
-    target_word_count: Optional[int] = Field(None, gt=0, description="目标字数")
     scene_director_result: Optional[dict] = Field(None, description="可选的场记分析结果")
 
 
@@ -212,8 +250,7 @@ async def generate_chapter_stream(
             novel_id=novel_id,
             chapter_number=request.chapter_number,
             outline=request.outline,
-            scene_director=scene_director,
-            target_word_count=request.target_word_count,
+            scene_director=scene_director
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -709,32 +746,44 @@ async def plan_novel(
             )
         logger.info(f"[PlanNovel] Novel found: {novel.title}")
 
-        # 生成宏观结构（部-卷-幕），AI 自主决定数量
+        # 生成 + 落库与全托管共用 ContinuousPlanningService.apply_macro_plan_from_llm_result
         logger.info(f"[PlanNovel] Calling generate_macro_plan (AI autonomous planning)")
         macro_plan = await continuous_planning_service.generate_macro_plan(
             novel_id=novel_id,
             target_chapters=novel.target_chapters,
-            structure_preference=None  # 不限制结构，让 AI 自主决定
+            structure_preference=None,
         )
-        logger.info(f"[PlanNovel] Macro plan generated")
+        logger.info(f"[PlanNovel] Macro plan generated, persisting (shared path with autopilot)")
 
-        # 确认并创建结构节点
-        logger.info(f"[PlanNovel] Calling confirm_macro_plan")
-        confirm_result = await continuous_planning_service.confirm_macro_plan(
+        confirm_result = await continuous_planning_service.apply_macro_plan_from_llm_result(
+            macro_plan,
             novel_id=novel_id,
-            structure=macro_plan.get("structure", [])
+            target_chapters=novel.target_chapters,
+            minimal_fallback_on_empty=True,
         )
 
-        logger.info(f"Created {confirm_result['created_nodes']} structure nodes")
+        logger.info(
+            f"Persisted macro structure: nodes={confirm_result['created_nodes']}, "
+            f"minimal_fallback={confirm_result.get('used_minimal_fallback')}"
+        )
+
+        if confirm_result.get("used_minimal_fallback"):
+            msg = (
+                f"LLM 未返回有效结构，已写入占位骨架；共 {confirm_result['created_nodes']} 个结构节点"
+            )
+        else:
+            msg = confirm_result.get("message") or (
+                f"成功创建 {confirm_result['created_nodes']} 个结构节点"
+            )
 
         return PlanResponse(
             success=True,
-            message=f"成功创建 {confirm_result['created_nodes']} 个结构节点",
+            message=msg,
             bible_updated=False,
             outline_updated=False,
             chapters_planned=0,
             structure_created=True,
-            nodes_created=confirm_result['created_nodes']
+            nodes_created=confirm_result["created_nodes"],
         )
 
     except HTTPException:

@@ -1,11 +1,6 @@
-import axios from 'axios'
+import { apiClient } from './config'
 
-const request = axios.create({
-  baseURL: '/api/v1',
-  timeout: 30000,
-})
-
-request.interceptors.response.use(response => response.data)
+const request = apiClient
 
 // TypeScript interfaces
 export interface ChapterSummary {
@@ -14,10 +9,6 @@ export interface ChapterSummary {
   key_events: string
   open_threads: string
   consistency_note: string
-  ending_state: string
-  ending_emotion: string
-  carry_over_question: string
-  next_opening_hint: string
   beat_sections: string[]
   micro_beats?: Array<{
     description: string

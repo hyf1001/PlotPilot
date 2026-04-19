@@ -1,7 +1,12 @@
 """AutoNovelGenerationWorkflow 单元测试"""
 import pytest
 from unittest.mock import Mock, AsyncMock
-from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
+from application.workflows.auto_novel_generation_workflow import (
+    AutoNovelGenerationWorkflow,
+    CHAPTER_CONTEXT_LAYER2_HEADER,
+    CHAPTER_CONTEXT_LAYER3_HEADER,
+    assemble_chapter_bundle_context_text,
+)
 from application.engine.dtos.generation_result import GenerationResult
 from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
 from application.engine.services.context_builder import ContextBuilder
@@ -18,7 +23,6 @@ from domain.ai.value_objects.token_usage import TokenUsage
 def mock_context_builder():
     """Mock ContextBuilder"""
     builder = Mock(spec=ContextBuilder)
-    builder.magnify_outline_to_beats.return_value = []
     builder.build_structured_context.return_value = {
         "layer1_text": "Layer 1 context",
         "layer2_text": "Layer 2 context",
@@ -97,6 +101,18 @@ def workflow(
     )
 
 
+def test_assemble_chapter_bundle_context_text_uses_t2_t3_headers():
+    payload = {
+        "layer1_text": "L1",
+        "layer2_text": "L2",
+        "layer3_text": "L3",
+    }
+    s = assemble_chapter_bundle_context_text(payload)
+    assert f"=== {CHAPTER_CONTEXT_LAYER2_HEADER} ===" in s
+    assert f"=== {CHAPTER_CONTEXT_LAYER3_HEADER} ===" in s
+    assert "L1" in s and "L2" in s and "L3" in s
+
+
 class TestGenerateChapter:
     """测试 generate_chapter 方法"""
 
@@ -114,6 +130,8 @@ class TestGenerateChapter:
         assert result.content == "Generated chapter content"
         assert result.token_count == 9250
         assert "Layer 1 context" in result.context_used
+        assert f"=== {CHAPTER_CONTEXT_LAYER2_HEADER} ===" in result.context_used
+        assert f"=== {CHAPTER_CONTEXT_LAYER3_HEADER} ===" in result.context_used
         assert isinstance(result.consistency_report, ConsistencyReport)
 
         # 验证调用顺序
@@ -179,19 +197,6 @@ class TestGenerateChapter:
                 outline=""
             )
 
-    @pytest.mark.asyncio
-    async def test_generate_chapter_returns_word_control_metadata(self, workflow):
-        result = await workflow.generate_chapter(
-            novel_id="novel-1",
-            chapter_number=1,
-            outline="Chapter 1 outline",
-            target_word_count=20,
-            enable_beats=False,
-        )
-        assert result.word_control is not None
-        assert result.word_control.target == 20
-        assert result.word_control.status in {"ok", "too_short", "too_long"}
-
 
 class TestGenerateChapterWithReview:
     """测试 generate_chapter_with_review 方法"""
@@ -241,23 +246,6 @@ class TestGenerateChapterStream:
         assert events[-1]["type"] == "done"
         assert events[-1]["content"] == "Generated chapter content"
         assert events[-1]["token_count"] == 9250
-
-    @pytest.mark.asyncio
-    async def test_stream_done_includes_word_control_when_target_requested(self, workflow):
-        events = []
-        async for e in workflow.generate_chapter_stream(
-            "novel-1",
-            1,
-            "Chapter outline",
-            target_word_count=20,
-            enable_beats=False,
-        ):
-            events.append(e)
-        done_event = events[-1]
-        assert done_event["type"] == "done"
-        assert done_event["target_word_count"] == 20
-        assert done_event["word_control"] is not None
-        assert done_event["word_control"]["target"] == 20
 
 
 class TestExtractChapterState:
@@ -584,7 +572,7 @@ class TestStyleIntegration:
         assert mock_llm_service.generate.called
 
         # 获取传递给 LLM 的 prompt
-        call_args = mock_llm_service.generate.call_args_list[0]
+        call_args = mock_llm_service.generate.call_args
         prompt = call_args[0][0]
 
         # 验证 prompt 包含风格指纹摘要

@@ -1,3 +1,4 @@
+import re
 import uuid
 import logging
 from typing import Optional, List, Dict, Any
@@ -29,37 +30,23 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _safe_int(value: Any, default: int) -> int:
-    """尽力从任意值中解析整数，失败时回退默认值。
-
-    修复：使用正则提取第一个连续整数片段，避免 "12.0" 被解析为 120、
-    "第1/2章" 被解析为 12 等问题。
-
-    Args:
-        value: 待解析的值
-        default: 解析失败时返回的默认值
-
-    Returns:
-        解析出的整数，解析失败则返回默认值
-    """
+def _safe_chapter_int(value: Any, fallback: int) -> int:
+    """LLM 常在 chapter 字段填「本章」「当前章节」等，避免 int() 直接崩。"""
     if value is None:
-        return default
+        return fallback
+    if isinstance(value, bool):
+        return fallback
     if isinstance(value, int):
         return value
-    text = str(value).strip()
-    if not text:
-        return default
-    try:
-        return int(text)
-    except (TypeError, ValueError):
-        import re
-        match = re.search(r"-?\d+", text)
-        if match:
-            try:
-                return int(match.group(0))
-            except ValueError:
-                return default
-        return default
+    if isinstance(value, float):
+        return int(value)
+    s = str(value).strip()
+    if s.isdigit():
+        return int(s)
+    m = re.search(r"\d+", s)
+    if m:
+        return int(m.group(0))
+    return fallback
 
 
 class StateUpdater:
@@ -99,7 +86,9 @@ class StateUpdater:
             chapter_number: 章节号
             chapter_state: 章节状态
         """
-        chapter_number = int(chapter_number)
+        chapter_number = _safe_chapter_int(chapter_number, 1)
+        if chapter_number < 1:
+            chapter_number = 1
         novel_id_obj = NovelId(novel_id)
         logger.info(
             f"StateUpdater.update_from_chapter: novel={novel_id}, chapter={chapter_number}, "
@@ -113,20 +102,20 @@ class StateUpdater:
             logger.debug(f"Updating Bible with {len(chapter_state.new_characters)} new characters")
             bible = self.bible_repository.get_by_novel_id(novel_id_obj)
             if bible is None:
-                raise ValueError("Bible not found")
+                logger.warning(f"Bible not found for novel {novel_id}, skipping character update")
+            else:
+                for char_data in chapter_state.new_characters:
+                    char_id = CharacterId(str(uuid.uuid4()))
+                    character = Character(
+                        id=char_id,
+                        name=char_data.get("name", "未知角色"),
+                        description=char_data.get("description", "")
+                    )
+                    bible.add_character(character)
+                    logger.debug(f"Added character: {char_data.get('name')}")
 
-            for char_data in chapter_state.new_characters:
-                char_id = CharacterId(str(uuid.uuid4()))
-                character = Character(
-                    id=char_id,
-                    name=char_data.get("name", "未知角色"),
-                    description=char_data.get("description", "")
-                )
-                bible.add_character(character)
-                logger.debug(f"Added character: {char_data.get('name')}")
-
-            self.bible_repository.save(bible)
-            logger.info(f"Bible updated: added {len(chapter_state.new_characters)} new characters for novel {novel_id}")
+                self.bible_repository.save(bible)
+                logger.info(f"Bible updated: added {len(chapter_state.new_characters)} new characters for novel {novel_id}")
         else:
             logger.debug("No new characters to add")
 
@@ -139,13 +128,19 @@ class StateUpdater:
             )
             foreshadowing_registry = self.foreshadowing_repository.get_by_novel_id(novel_id_obj)
             if foreshadowing_registry is None:
-                raise ValueError("ForeshadowingRegistry not found")
+                logger.info(f"ForeshadowingRegistry not found for novel {novel_id}, creating new one")
+                foreshadowing_registry = ForeshadowingRegistry(
+                    id=str(uuid.uuid4()),
+                    novel_id=novel_id_obj
+                )
 
             # 添加新伏笔
             for foreshadow_data in chapter_state.foreshadowing_planted:
                 foreshadowing = Foreshadowing(
                     id=str(uuid.uuid4()),
-                    planted_in_chapter=_safe_int(foreshadow_data.get("chapter", chapter_number), chapter_number),
+                    planted_in_chapter=_safe_chapter_int(
+                        foreshadow_data.get("chapter"), chapter_number
+                    ),
                     description=foreshadow_data.get("description", ""),
                     importance=ImportanceLevel.MEDIUM,
                     status=ForeshadowingStatus.PLANTED
@@ -156,7 +151,9 @@ class StateUpdater:
             # 解决伏笔
             for resolved_data in chapter_state.foreshadowing_resolved:
                 fid = self._resolve_foreshadowing_id(foreshadowing_registry, resolved_data)
-                resolved_ch = _safe_int(resolved_data.get("chapter", chapter_number), chapter_number)
+                resolved_ch = _safe_chapter_int(
+                    resolved_data.get("chapter"), chapter_number
+                )
                 if not fid:
                     logger.warning("Skipping foreshadowing resolution with no identifiable reference: %s", resolved_data)
                     continue
@@ -357,90 +354,13 @@ class StateUpdater:
                 threads = [f.get("description", "")[:40] for f in chapter_state.foreshadowing_planted]
                 open_threads = "伏笔：" + "；".join(t for t in threads if t)
 
-            summary = ""
-            ending_state = ""
-            ending_emotion = ""
-            carry_over_question = ""
-            next_opening_hint = ""
-
-            chapter = None
-            if self.chapter_repository:
-                try:
-                    chapter = self.chapter_repository.get_by_novel_and_number(
-                        NovelId(novel_id), chapter_number
-                    )
-                except Exception as e:
-                    logger.debug("StateUpdater 获取章节正文失败: %s", e)
-
-            content = (getattr(chapter, "content", "") or "").strip()
-
-            # 正文不可用时，尝试从现有记录保留接缝字段
-            existing_summary = None
-            if not content and self.knowledge_service:
-                try:
-                    existing_knowledge = self.knowledge_service.get_knowledge(novel_id)
-                    if existing_knowledge:
-                        for ch in (existing_knowledge.chapters or []):
-                            if ch.chapter_id == chapter_number:
-                                existing_summary = ch
-                                break
-                except Exception:
-                    pass
-
-            if content:
-                paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-                if paragraphs:
-                    summary = " ".join(paragraphs[:2]).strip()[:260]
-                    ending_state = paragraphs[-1][:180]
-                    if len(paragraphs) >= 2:
-                        next_opening_hint = paragraphs[-2][:120]
-                if not ending_state:
-                    ending_state = content[-180:]
-
-                # 简单情绪锚点：优先取末段中的情绪词
-                tail = paragraphs[-1] if paragraphs else content[-220:]
-                emotion_keywords = [
-                    "愤怒", "恐惧", "悲伤", "震惊", "警惕", "冷静", "苦涩", "决绝",
-                    "紧张", "困惑", "清醒", "痛苦", "压抑", "释然", "迟疑", "愧疚",
-                ]
-                hits = [kw for kw in emotion_keywords if kw in tail]
-                ending_emotion = "、".join(hits[:3]) if hits else tail[:60]
-
-                # 从最新段落取章末钩子
-                # 修复：取最新段落末尾的问题（latest_parts[-1]），而非开头的
-                if paragraphs:
-                    latest_chunk = paragraphs[-1].replace("！", "？")
-                    latest_parts = [seg.strip() for seg in latest_chunk.split("？") if seg.strip()]
-                    if latest_parts:
-                        carry_over_question = latest_parts[-1][:120]
-                    elif open_threads:
-                        carry_over_question = open_threads[:120]
-                elif open_threads:
-                    carry_over_question = open_threads[:120]
-
-                if not next_opening_hint:
-                    next_opening_hint = ending_state[:120]
-            elif existing_summary:
-                # 修复问题 6：正文不可用时从现有记录保留接缝字段，避免覆盖为空
-                # 这保证了即使正文获取失败，seam 闭环所需的接缝数据也不会丢失
-                summary = getattr(existing_summary, "summary", "") or ""
-                ending_state = getattr(existing_summary, "ending_state", "") or ""
-                ending_emotion = getattr(existing_summary, "ending_emotion", "") or ""
-                carry_over_question = getattr(existing_summary, "carry_over_question", "") or ""
-                next_opening_hint = getattr(existing_summary, "next_opening_hint", "") or ""
-                # open_threads 已在前面根据 chapter_state.foreshadowing_planted 计算，保留其值
-
             self.knowledge_service.upsert_chapter_summary(
                 novel_id=novel_id,
                 chapter_id=chapter_number,
-                summary=summary,
+                summary="",  # 暂不生成摘要文字（节省 token）
                 key_events=key_events,
                 open_threads=open_threads,
                 consistency_note="",
-                ending_state=ending_state,
-                ending_emotion=ending_emotion,
-                carry_over_question=carry_over_question,
-                next_opening_hint=next_opening_hint,
                 beat_sections=[],
                 sync_status="auto"
             )

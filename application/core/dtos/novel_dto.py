@@ -1,8 +1,7 @@
 """Novel 数据传输对象"""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, TYPE_CHECKING
 from datetime import datetime
-from application.config import AppConfig
 
 if TYPE_CHECKING:
     from domain.novel.entities.novel import Novel
@@ -76,14 +75,13 @@ class NovelDTO:
     premise: str
     chapters: List[ChapterDTO]
     total_word_count: int
-    target_words_per_chapter: int = AppConfig.DEFAULT_WORDS_PER_CHAPTER
     has_bible: bool = False
     has_outline: bool = False
     autopilot_status: str = "stopped"
     auto_approve_mode: bool = False
-    genre: str = ""
-    theme_agent_enabled: bool = False
-    enabled_theme_skills: List[str] = field(default_factory=list)
+    locked_genre: str = ""
+    locked_world_preset: str = ""
+    target_words_per_chapter: int = 2500
 
     @classmethod
     def from_domain(cls, novel: 'Novel') -> 'NovelDTO':
@@ -100,19 +98,23 @@ class NovelDTO:
         _ap = getattr(novel, 'autopilot_status', 'stopped')
         autopilot_status = _ap.value if hasattr(_ap, 'value') else str(_ap)
 
+        premise_text = getattr(novel, 'premise', '') or ''
+        from application.core.premise_genre_world import parse_genre_world_from_premise
+
+        lg, lw = parse_genre_world_from_premise(premise_text)
+
         return cls(
             id=novel.novel_id.value,
             title=novel.title,
             author=novel.author,
             target_chapters=novel.target_chapters,
             stage=_public_stage(novel),
-            premise=getattr(novel, 'premise', ''),  # 兼容旧数据
+            premise=premise_text,
             chapters=chapters,
             total_word_count=novel.get_total_word_count().value,
-            target_words_per_chapter=getattr(novel, 'target_words_per_chapter', AppConfig.DEFAULT_WORDS_PER_CHAPTER),
             autopilot_status=autopilot_status,
             auto_approve_mode=getattr(novel, 'auto_approve_mode', False),
-            genre=getattr(novel, 'genre', ''),
-            theme_agent_enabled=getattr(novel, 'theme_agent_enabled', False),
-            enabled_theme_skills=getattr(novel, 'enabled_theme_skills', []) or [],
+            locked_genre=lg,
+            locked_world_preset=lw,
+            target_words_per_chapter=int(getattr(novel, "target_words_per_chapter", 2500) or 2500),
         )
