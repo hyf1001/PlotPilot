@@ -1,13 +1,15 @@
 # PlotPilot（墨枢）
 
-<img width="400" height="300" alt="微信图片_20260415003740_893_102" src="https://github.com/user-attachments/assets/71f083b8-a787-4eaf-a927-b15185a4f317" />
+<p align="center">
+  <img src="docs/plotpilot-readme.256.png" alt="PlotPilot 墨枢" width="480" />
+</p>
 
 > AI 驱动的长篇创作平台 — 自动驾驶生成、知识图谱管理、风格分析一体化。
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![Vue](https://img.shields.io/badge/Vue-3.5-green.svg)](https://vuejs.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-teal.svg)](https://fastapi.tiangolo.com/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Vue](https://img.shields.io/badge/Vue-3.5-4FC08D?style=flat&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109%2B-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-D22128?style=flat&logo=apache&logoColor=white)](LICENSE)
 
 - **顶层架构**：上下文管理、知识体系、消费组件、状态感知等，超过 20 余个 prompt 接点，支持定制。
 - **通用设计**：通过提示词定制，支持短篇小说、超长篇小说、剧本、标书、转录等多种任务类型。
@@ -17,7 +19,7 @@
 - **伏笔台账**：追踪并自动闭合叙事钩子。
 - **风格分析**：作者声音漂移检测与文体指纹。
 - **节拍表与故事结构**：三幕式、章节节拍规划。
-- **DDD 四层架构**：`domain` / `application` / `infrastructure` / `interfaces`。
+- **DDD 四层架构**：`domain` / `application` / `infrastructure` / `interfaces`
 
 ---
 
@@ -46,6 +48,14 @@
 
 ---
 
+## 桌面安装版（Windows · Tauri）
+
+- **当前版本**：[v1.0.2](https://github.com/shenminglinyi/PlotPilot/releases/tag/v1.0.2) · 安装包：[`PlotPilot_1.0.2_x64-setup.exe`](https://github.com/shenminglinyi/PlotPilot/releases/download/v1.0.2/PlotPilot_1.0.2_x64-setup.exe)（NSIS）
+- **全部发行版**：[GitHub Releases](https://github.com/shenminglinyi/PlotPilot/releases)
+- **说明**：安装包内含冻结后端，无需单独装 Python；构建流程见 [docs/BUILD_INSTALLER.md](docs/BUILD_INSTALLER.md)。
+
+---
+
 ## 开发者启动
 
 **环境要求**：Python 3.9+、Node.js 18+
@@ -69,26 +79,30 @@ cd frontend && npm install && npm run dev
 
 ## 技术栈
 
-| 层 | 技术 |
-|---|---|
-| 后端框架 | FastAPI + uvicorn，DDD 四层架构 |
-| AI 模型 | OpenAI 兼容协议 / Anthropic Claude / 火山方舟 Doubao |
-| 向量存储 | 本地 FAISS（无需额外服务） |
-| 嵌入模型 | OpenAI 兼容 API（默认）/ 本地 sentence-transformers（见 `requirements-local.txt`） |
-| 主数据库 | SQLite |
-| 前端 | Vue 3 + TypeScript + Vite + Naive UI + ECharts |
+
+| 层     | 技术                                                                      |
+| ----- | ----------------------------------------------------------------------- |
+| 后端框架  | FastAPI + uvicorn，DDD 四层架构                                              |
+| AI 模型 | OpenAI 兼容协议 / Anthropic Claude / 火山方舟 Doubao                            |
+| 向量存储  | 本地 FAISS（无需额外服务）                                                        |
+| 嵌入模型  | OpenAI 兼容 API（默认）/ 本地 sentence-transformers（见 `requirements-local.txt`） |
+| 主数据库  | SQLite                                                                  |
+| 前端    | Vue 3 + TypeScript + Vite + Naive UI + ECharts                          |
+
 
 ---
 
 ## 环境变量
 
-| 变量 | 说明 |
-|---|---|
-| `ANTHROPIC_API_KEY` / `ARK_API_KEY` | 至少配置一个 LLM 凭证 |
-| `EMBEDDING_SERVICE` | `openai`（默认）或 `local`（本地需额外安装模型） |
-| `CORS_ORIGINS` | 生产环境前端域名，逗号分隔 |
-| `DISABLE_AUTO_DAEMON` | 设为 `1` 禁止启动时自动拉起守护进程 |
-| `LOG_LEVEL` / `LOG_FILE` | 日志级别与路径 |
+
+| 变量                                  | 说明                               |
+| ----------------------------------- | -------------------------------- |
+| `ANTHROPIC_API_KEY` / `ARK_API_KEY` | 至少配置一个 LLM 凭证                    |
+| `EMBEDDING_SERVICE`                 | `openai`（默认）或 `local`（本地需额外安装模型） |
+| `CORS_ORIGINS`                      | 生产环境前端域名，逗号分隔                    |
+| `DISABLE_AUTO_DAEMON`               | 设为 `1` 禁止启动时自动拉起守护进程             |
+| `LOG_LEVEL` / `LOG_FILE`            | 日志级别与路径                          |
+
 
 完整说明见 `.env.example`。
 
@@ -106,10 +120,10 @@ pytest tests/ -v
 
 ## 贡献
 
-1. Fork 本仓库  
-2. 新建分支：`git checkout -b feat/your-feature`  
-3. 提交说明建议遵循 [Conventional Commits](https://www.conventionalcommits.org/)  
-4. 推送并发起 Pull Request  
+1. Fork 本仓库
+2. 新建分支：`git checkout -b feat/your-feature`
+3. 提交说明建议遵循 [Conventional Commits](https://www.conventionalcommits.org/)
+4. 推送并发起 Pull Request
 
 ---
 
@@ -130,3 +144,15 @@ pytest tests/ -v
 本项目采用 **Apache License 2.0**，并附加 **Commons Clause** 条件限制。
 
 允许学习、修改与非商业内部部署；**严禁**将本项目（含修改版）用于任何营利行为，包括封装收费 SaaS、打包售卖源码或作为收费产品的增值服务。详见 [LICENSE](LICENSE)。
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=shenminglinyi%2FPlotPilot&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=shenminglinyi/PlotPilot&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=shenminglinyi/PlotPilot&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=shenminglinyi/PlotPilot&type=date&legend=top-left" />
+ </picture>
+</a>

@@ -40,23 +40,51 @@
     </button>
 
     <teleport to="body">
-      <n-drawer
-        :show="showPanel"
-        placement="right"
-        :width="drawerWidth"
-        :close-on-esc="true"
+      <n-modal
+        v-model:show="showPanel"
+        preset="card"
+        title=""
+        :style="aiConsoleModalStyle"
+        :bordered="true"
+        :segmented="{ content: true, footer: 'soft' }"
         :mask-closable="true"
-        @update:show="handleDrawerShowChange"
+        :close-on-esc="true"
+        @update:show="handleModalShowChange"
       >
-        <n-drawer-content
-          closable
-          :header-style="drawerHeaderStyle"
-          :native-scrollbar="false"
-          :body-content-style="drawerBodyStyle"
-        >
-          <template #header>
-            <div class="global-llm-drawer-header">
-              <!-- 顶部 Tab 切换 -->
+        <template #header>
+          <div class="ai-console-modal-header">
+            <div class="modal-header">
+              <div class="modal-header-left">
+                <span class="modal-header-icon modal-header-icon-llm" aria-hidden="true">AI</span>
+                <span class="modal-header-title">AI 控制台</span>
+                <n-tag
+                  v-if="drawerTab === 'llm'"
+                  size="small"
+                  :type="runtimeSummary?.using_mock ? 'warning' : 'info'"
+                  :bordered="false"
+                >
+                  {{
+                    runtimeLoading
+                      ? '读取中…'
+                      : runtimeSummary?.using_mock
+                        ? 'Mock'
+                        : (runtimeSummary?.protocol || '未连接')
+                  }}
+                </n-tag>
+              </div>
+              <div class="modal-header-actions">
+                <n-button
+                  v-if="drawerTab === 'llm'"
+                  size="small"
+                  secondary
+                  @click="modelSettingsModalRef?.open()"
+                >
+                  核心引擎
+                </n-button>
+              </div>
+            </div>
+
+            <div class="ai-console-header-stack">
               <div class="drawer-tab-switch">
                 <div class="drawer-tab-track" :style="{ transform: `translateX(${drawerTab === 'embedding' ? 0 : '100%'})` }"></div>
                 <button
@@ -77,7 +105,6 @@
                 </button>
               </div>
 
-              <!-- 运行时状态栏（仅 LLM 标签页显示） -->
               <div v-if="drawerTab === 'llm'" class="global-llm-runtime-bar" :class="{ 'is-mock': runtimeSummary?.using_mock }">
                 <div class="global-llm-runtime-main">
                   <span class="global-llm-runtime-label">当前激活模型</span>
@@ -86,9 +113,6 @@
                   </span>
                 </div>
                 <div class="global-llm-runtime-meta">
-                  <n-button size="tiny" secondary @click="modelSettingsModalRef?.open()">
-                    核心引擎
-                  </n-button>
                   <span class="global-llm-runtime-chip">
                     {{ runtimeSummary?.protocol || (runtimeLoading ? 'loading' : 'mock') }}
                   </span>
@@ -98,22 +122,24 @@
                 </div>
               </div>
 
-              <!-- 嵌入模型标题（仅嵌入标签页显示） -->
               <div v-else class="embedding-header-info">
                 <div class="embedding-header-title">向量检索使用的嵌入模型配置</div>
-                <div class="embedding-header-desc">每本书的向量索引与嵌入模型绑定，一旦开始写作后切换模型将导致已有索引不可用。如需更换，请先删除对应书籍的向量数据（data/chromadb/）再重新生成。</div>
+                <div class="embedding-header-desc">
+                  每本书的向量索引与嵌入模型绑定，一旦开始写作后切换模型将导致已有索引不可用。如需更换，请先删除对应书籍的向量数据（data/chromadb/）再重新生成。
+                </div>
               </div>
             </div>
-          </template>
+          </div>
+        </template>
 
-          <div class="global-llm-drawer-body">
-            <div class="drawer-scroll-content">
+        <div class="modal-body ai-console-modal-body">
+          <div class="drawer-scroll-content">
               <!-- ══════════════════════════════════
                    LLM 设置面板
                    ══════════════════════════════════ -->
               <div v-show="drawerTab === 'llm'">
                 <LLMControlPanel
-                  scroll-state-key="global-drawer"
+                  scroll-state-key="global-modal"
                   @panel-updated="handlePanelUpdated"
                 />
               </div>
@@ -143,14 +169,83 @@
                       <div class="emb-local-name">BAAI/bge-small-zh-v1.5</div>
                       <div class="emb-local-desc">本地中文嵌入模型，无需网络连接</div>
                     </div>
-                    <n-form label-placement="left" label-width="100" style="margin-top: 14px">
-                      <n-form-item label="模型路径">
-                        <n-input v-model:value="embeddingForm.model_path" placeholder="BAAI/bge-small-zh-v1.5" />
-                      </n-form-item>
-                      <n-form-item label="GPU 加速">
-                        <n-switch v-model:value="embeddingForm.use_gpu" />
-                      </n-form-item>
-                    </n-form>
+
+                    <!-- ═══ 扩展包安装状态 & 操作 ═══ -->
+                    <div class="ext-install-section">
+                      <!-- 未安装 / 检测中 -->
+                      <template v-if="extensionsStatus && !extensionsStatus.all_installed">
+                        <n-alert type="warning" :show-icon="true" class="mb-3">
+                          <template #header>⚠️ 缺少本地 AI 扩展包</template>
+                          本地向量检索需要 faiss / numpy / sentence-transformers 等依赖。
+                          请点击下方按钮一键安装（约 2GB，需要 5~20 分钟）。
+                        </n-alert>
+                        <div class="ext-install-actions">
+                          <n-button
+                            type="warning"
+                            :loading="extensionsInstalling"
+                            :disabled="extensionsInstalling"
+                            @click="startInstallExtensions"
+                          >
+                            {{ extensionsInstalling ? '正在安装...' : '📦 下载并安装扩展包' }}
+                          </n-button>
+                          <n-button
+                            v-if="extensionsInstalling"
+                            size="small"
+                            secondary
+                            @click="cancelInstallExtensions"
+                          >
+                            取消
+                          </n-button>
+                        </div>
+                      </template>
+
+                      <!-- 已安装 -->
+                      <template v-else-if="extensionsStatus && extensionsStatus.all_installed">
+                        <n-alert type="success" :show-icon="false" class="mb-3">
+                          ✅ 本地 AI 扩展包已安装完毕（faiss · numpy · sentence-transformers）
+                        </n-alert>
+                      </template>
+
+                      <!-- 安装进度面板 -->
+                      <div v-if="extensionsInstalling" class="ext-install-progress">
+                        <n-progress
+                          type="line"
+                          :percentage="extensionsInstallPercent"
+                          :status="extensionsInstallPercent >= 100 ? 'success' : 'default'"
+                          :show-indicator="true"
+                        />
+                        <div class="ext-install-log">
+                          <div
+                            v-for="(log, idx) in extensionsInstallLog"
+                            :key="idx"
+                            class="ext-log-line"
+                          >{{ log }}</div>
+                          <div v-if="extensionsInstalling && extensionsInstallLog.length === 0" class="ext-log-line ext-log-dim">
+                            正在连接服务器...
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- 安装完成后的日志 -->
+                      <div v-if="!extensionsInstalling && extensionsInstallLog.length > 0" class="ext-install-progress">
+                        <div class="ext-install-log">
+                          <div
+                            v-for="(log, idx) in extensionsInstallLog.slice(-8)"
+                            :key="idx"
+                            class="ext-log-line"
+                          >{{ log }}</div>
+                        </div>
+                      </div>
+
+                      <n-form label-placement="left" label-width="100" style="margin-top: 14px">
+                        <n-form-item label="模型路径">
+                          <n-input v-model:value="embeddingForm.model_path" placeholder="BAAI/bge-small-zh-v1.5" />
+                        </n-form-item>
+                        <n-form-item label="GPU 加速">
+                          <n-switch v-model:value="embeddingForm.use_gpu" />
+                        </n-form-item>
+                      </n-form>
+                    </div>
                   </div>
 
                   <!-- Cloud mode -->
@@ -204,10 +299,20 @@
                   </div>
                 </template>
               </div>
-            </div>
           </div>
-        </n-drawer-content>
-      </n-drawer>
+        </div>
+
+        <template #footer>
+          <div class="modal-footer-hint">
+            <template v-if="drawerTab === 'llm'">
+              配置持久化在本地 SQLite；激活档案需填写有效的 API Key 与模型 ID 后才会走真实网关。
+            </template>
+            <template v-else>
+              嵌入模型与向量维度绑定；更换模型后通常需要重建索引。
+            </template>
+          </div>
+        </template>
+      </n-modal>
 
       <!-- 核心引擎配置模态框 -->
       <ModelSettingsModal ref="modelSettingsModalRef" />
@@ -217,13 +322,13 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { NDrawer, NDrawerContent, NButton, NSwitch, NForm, NFormItem, NInput, NSelect, NSpin } from 'naive-ui'
+import { NModal, NTag, NButton, NSwitch, NForm, NFormItem, NInput, NSelect, NSpin, NAlert, NProgress } from 'naive-ui'
 import {
   llmControlApi,
   type LLMControlPanelData,
   type LLMRuntimeSummary,
 } from '../../api/llmControl'
-import { settingsApi, type EmbeddingConfig } from '../../api/settings'
+import { settingsApi, type EmbeddingConfig, type ExtensionsStatus, type InstallEvent } from '../../api/settings'
 import LLMControlPanel from '../workbench/LLMControlPanel.vue'
 import ModelSettingsModal from '../settings/ModelSettingsModal.vue'
 
@@ -244,28 +349,13 @@ const runtimeLoading = ref(false)
 const runtimeSummary = ref<LLMRuntimeSummary | null>(null)
 const modelSettingsModalRef = ref<InstanceType<typeof ModelSettingsModal> | null>(null)
 
-const drawerWidth = computed(() => {
-  const width = document.documentElement?.clientWidth || window.innerWidth || 1440
-  if (width <= 640) return width
-  if (width <= 900) return Math.max(360, Math.round(width * 0.96))
-  if (width <= 1280) return Math.min(960, Math.round(width * 0.84))
-  return 1040
-})
-
-const drawerBodyStyle = computed(() => {
-  const width = document.documentElement?.clientWidth || window.innerWidth || 1440
-  return {
-    padding: '0',
-    height: width <= 768 ? 'calc(100vh - 56px)' : 'calc(100vh - 68px)',
-  }
-})
-
-const drawerHeaderStyle = computed(() => {
-  const width = document.documentElement?.clientWidth || window.innerWidth || 1440
-  return {
-    padding: width <= 768 ? '16px 16px 12px' : '18px 20px 14px',
-  }
-})
+/** 与提示词广场入口弹窗一致的居中卡片尺寸 */
+const aiConsoleModalStyle = {
+  width: '92vw',
+  maxWidth: '1100px',
+  height: '85vh',
+  marginTop: '5vh',
+} as const
 
 async function refreshRuntimeSummary() {
   runtimeLoading.value = true
@@ -283,7 +373,7 @@ function handlePanelUpdated(data: LLMControlPanelData) {
   runtimeSummary.value = data.runtime
 }
 
-function handleDrawerShowChange(value: boolean) {
+function handleModalShowChange(value: boolean) {
   showPanel.value = value
   if (value) void refreshRuntimeSummary()
 }
@@ -296,13 +386,75 @@ const embeddingSaving = ref(false)
 const fetchingEmbeddingModels = ref(false)
 const embeddingModelOptions = ref<Array<{ label: string; value: string }>>([])
 
+// ── 扩展包安装状态 ─────────────────────────────────────
+const extensionsStatus = ref<ExtensionsStatus | null>(null)
+const extensionsChecking = ref(false)
+const extensionsInstalling = ref(false)
+const extensionsInstallLog = ref<string[]>([])
+const extensionsInstallPercent = ref(0)
+let extensionsAbortCtrl: AbortController | null = null
+
+async function checkExtensionsStatus() {
+  extensionsChecking.value = true
+  try {
+    extensionsStatus.value = await settingsApi.getExtensionsStatus()
+  } catch {
+    // 静默失败
+  } finally {
+    extensionsChecking.value = false
+  }
+}
+
+function startInstallExtensions() {
+  if (extensionsInstalling.value) return
+  extensionsInstalling.value = true
+  extensionsInstallLog.value = []
+  extensionsInstallPercent.value = 0
+
+  extensionsAbortCtrl = settingsApi.installExtensions({
+    onEvent: (event: InstallEvent) => {
+      if (event.type === 'progress' && event.percent !== undefined) {
+        extensionsInstallPercent.value = event.percent
+      }
+      // 只记录重要日志（避免刷屏）
+      if (['info', 'success', 'error', 'warn', 'done'].includes(event.type)) {
+        extensionsInstallLog.value.push(event.message)
+        // 只保留最近 50 条
+        if (extensionsInstallLog.value.length > 50) {
+          extensionsInstallLog.value = extensionsInstallLog.value.slice(-50)
+        }
+      }
+    },
+    onDone: (success) => {
+      extensionsInstalling.value = false
+      if (success) {
+        extensionsInstallLog.value.push('✅ 安装完成！请重启服务以生效。')
+        extensionsInstallPercent.value = 100
+      } else {
+        extensionsInstallLog.value.push('❌ 安装失败，请检查网络后重试')
+      }
+      void checkExtensionsStatus()
+    },
+    onError: (err) => {
+      extensionsInstalling.value = false
+      extensionsInstallLog.value.push(`❌ 错误: ${err.message}`)
+    },
+  })
+}
+
+function cancelInstallExtensions() {
+  extensionsAbortCtrl?.abort()
+  extensionsInstalling.value = false
+  extensionsInstallLog.value.push('已取消安装')
+}
+
 const embeddingForm = ref<EmbeddingConfig>({
   mode: 'local',
   api_key: '',
   base_url: '',
-  model: 'text-embedding-3-small',
+  model: '',
   use_gpu: true,
-  model_path: 'BAAI/bge-small-zh-v1.5',
+  model_path: '',
 })
 
 async function loadEmbeddingConfig() {
@@ -351,6 +503,7 @@ async function handleFetchEmbeddingModels() {
 function openPanel() {
   void refreshRuntimeSummary()
   void loadEmbeddingConfig()
+  void checkExtensionsStatus()
   showPanel.value = true
 }
 </script>
@@ -609,11 +762,74 @@ function openPanel() {
   text-overflow: ellipsis;
 }
 
-/* ── Drawer Header ─────────────────────────────────── */
-.global-llm-drawer-header {
+/* ── 居中弹窗头部（对齐提示词广场 modal-header）── */
+.ai-console-modal-header {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  width: 100%;
+}
+
+.ai-console-header-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 10px;
+}
+
+.modal-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.modal-header-icon-llm {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--color-brand), var(--color-brand-hover));
+  color: var(--app-text-inverse);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.modal-header-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--app-text-primary);
+}
+
+.modal-header-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.modal-body.ai-console-modal-body {
+  height: calc(85vh - 230px);
+  min-height: 260px;
+  overflow: hidden;
+  border-radius: var(--app-radius-md, 8px);
+}
+
+.modal-footer-hint {
+  font-size: 12px;
+  color: var(--app-text-muted);
+  line-height: 1.55;
 }
 
 /* ── Tab Switch（切换嵌入/LLM）── */
@@ -764,15 +980,9 @@ function openPanel() {
   font-size: 12px;
 }
 
-/* ── Drawer Body ───────────────────────────────────── */
-.global-llm-drawer-body {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-
 .drawer-scroll-content {
   height: 100%;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -831,6 +1041,50 @@ function openPanel() {
 }
 
 .emb-cloud-form { padding: 0 4px; }
+
+/* ── 扩展包安装区域 ─────────────────────────────── */
+.ext-install-section {
+  margin-top: 12px;
+}
+
+.ext-install-section .mb-3 {
+  margin-bottom: 12px;
+}
+
+.ext-install-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ext-install-progress {
+  margin-top: 12px;
+  border: 1px solid var(--app-border, rgba(128, 128, 128, 0.2));
+  border-radius: var(--app-radius-md, 8px);
+  padding: 12px;
+  background: var(--app-surface-subtle, rgba(0, 0, 0, 0.02));
+}
+
+.ext-install-log {
+  max-height: 160px;
+  overflow-y: auto;
+  margin-top: 8px;
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  user-select: text;
+}
+
+.ext-log-line {
+  color: var(--app-text-secondary);
+  word-break: break-all;
+}
+
+.ext-log-dim {
+  color: var(--app-text-muted);
+  font-style: italic;
+}
 
 .model-row {
   display: flex;

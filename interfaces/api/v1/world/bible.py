@@ -14,6 +14,11 @@ from interfaces.api.dependencies import (
     get_auto_knowledge_generator
 )
 from domain.shared.exceptions import EntityNotFoundError
+from application.world.bible_generation_state import (
+    clear_bible_generation_state,
+    get_bible_generation_state,
+    record_bible_generation_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,9 +174,8 @@ async def generate_bible(
         202 Accepted，表示生成任务已启动
     """
     async def _generate_task():
-        import sys
-        print(f"[TASK START] Bible generation for {novel_id}, stage={stage}", file=sys.stderr, flush=True)
-        logger.info(f"Starting Bible generation task for {novel_id}, stage={stage}")
+        logger.info("Bible generation task started for %s, stage=%s", novel_id, stage)
+        clear_bible_generation_state(novel_id)
         try:
             # 获取小说信息（需要 premise 和 target_chapters）
             from interfaces.api.dependencies import get_novel_service
@@ -179,6 +183,7 @@ async def generate_bible(
             novel = novel_service.get_novel(novel_id)
             if not novel:
                 logger.error(f"Novel not found: {novel_id}")
+                record_bible_generation_failure(novel_id, stage, "小说不存在，无法生成 Bible")
                 return
 
             # 使用 premise（故事梗概）生成 Bible，如果没有则使用 title
@@ -206,13 +211,12 @@ async def generate_bible(
                 bible_summary
             )
             logger.info(f"Bible and Knowledge generated successfully for {novel_id}")
+            clear_bible_generation_state(novel_id)
         except Exception as e:
-            import sys
             import traceback
-            print(f"[TASK ERROR] {e}", file=sys.stderr, flush=True)
-            traceback.print_exc(file=sys.stderr)
-            logger.error(f"Failed to generate Bible/Knowledge for {novel_id}: {e}")
+            logger.error("Bible generation task failed for %s: %s", novel_id, e)
             logger.error(traceback.format_exc())
+            record_bible_generation_failure(novel_id, stage, str(e))
 
     background_tasks.add_task(_generate_task)
 
@@ -243,6 +247,20 @@ async def create_bible(
 
 
 # 注意：必须先注册比 `/novels/{id}/bible` 更长的路径，避免与 `{novel_id}` 匹配歧义
+@router.get("/novels/{novel_id}/bible/generation-feedback")
+async def get_bible_generation_feedback(novel_id: str):
+    """新书向导轮询用：最近一次 Bible 异步生成失败原因（成功或未失败时为 null）。"""
+    state = get_bible_generation_state(novel_id)
+    if not state:
+        return {"novel_id": novel_id, "error": None, "stage": None, "at": None}
+    return {
+        "novel_id": novel_id,
+        "error": state.get("error"),
+        "stage": state.get("stage"),
+        "at": state.get("at"),
+    }
+
+
 @router.get("/novels/{novel_id}/bible/status")
 async def get_bible_status(
     novel_id: str,
