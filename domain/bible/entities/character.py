@@ -1,4 +1,4 @@
-from typing import List, Any
+from typing import List, Any, Optional, Dict
 from domain.shared.base_entity import BaseEntity
 from domain.bible.value_objects.character_id import CharacterId
 from domain.shared.exceptions import InvalidOperationError
@@ -19,24 +19,48 @@ class Character(BaseEntity):
         name: str,
         description: str,
         relationships: List[Any] = None,
+        gender: str = "",
+        age: str = "",
+        appearance: str = "",
+        personality: str = "",
+        background: str = "",
+        core_motivation: str = "",
+        inner_lack: str = "",
         public_profile: str = "",
         hidden_profile: str = "",
         reveal_chapter: int = None,
         mental_state: str = "NORMAL",
+        mental_state_reason: str = "",
         verbal_tic: str = "",
         idle_behavior: str = "",
+        core_belief: str = "",
+        moral_taboos: Optional[List[str]] = None,
+        voice_profile: Optional[Dict[str, Any]] = None,
+        active_wounds: Optional[List[Dict[str, str]]] = None,
     ):
         super().__init__(id.value)
         self.character_id = id
         self.name = name
         self.description = description
         self.relationships = relationships or []
+        self.gender = gender or ""
+        self.age = age or ""
+        self.appearance = appearance or ""
+        self.personality = personality or ""
+        self.background = background or ""
+        self.core_motivation = core_motivation or ""
+        self.inner_lack = inner_lack or ""
         self.public_profile = public_profile
         self.hidden_profile = hidden_profile
         self.reveal_chapter = reveal_chapter
         self.mental_state = mental_state or "NORMAL"
+        self.mental_state_reason = mental_state_reason or ""
         self.verbal_tic = verbal_tic or ""
         self.idle_behavior = idle_behavior or ""
+        self.core_belief = core_belief or ""
+        self.moral_taboos = list(moral_taboos or [])
+        self.voice_profile = dict(voice_profile or {})
+        self.active_wounds = list(active_wounds or [])
 
         # 验证 reveal_chapter
         if self.reveal_chapter is not None and self.reveal_chapter < 1:

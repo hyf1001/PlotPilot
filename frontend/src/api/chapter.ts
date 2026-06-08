@@ -1,4 +1,6 @@
-import { apiClient } from './config'
+import { apiClient, subscribeChapterStream as subscribeChapterStreamRequest } from './config'
+import { apiRoutes } from './endpoints'
+import type { GuardrailCheckResponse } from './engineCore'
 
 export interface ChapterDTO {
   id: string
@@ -8,12 +10,37 @@ export interface ChapterDTO {
   content: string
   status: string
   word_count: number
+  generation_hint?: string
   created_at: string
   updated_at: string
 }
 
+export interface ChapterMicroBeatPayload {
+  description: string
+  target_words?: number
+  focus?: string
+  location_id?: string
+  function?: string
+  pov?: string
+  cast_refs?: string[]
+  location_refs?: string[]
+  prop_refs?: string[]
+  knowledge_refs?: string[]
+  visible_action?: string
+  conflict?: string
+  delta?: string
+  handoff_to_next?: string
+  must_include?: string[]
+  must_not_include?: string[]
+  active_action?: string
+  emotion_gap?: string
+  forbidden_drift?: string
+}
+
 export interface UpdateChapterRequest {
   content: string
+  /** 指挥器微观节拍；保存时写入 chapter_summaries.micro_beats */
+  micro_beats?: ChapterMicroBeatPayload[]
 }
 
 export interface ChapterReviewDTO {
@@ -38,6 +65,10 @@ export interface ChapterReviewAiResponse {
   saved: boolean
 }
 
+export interface ChapterListResponse {
+  chapters?: ChapterDTO[]
+}
+
 export const chapterApi = {
   /**
    * List all chapters for a novel
@@ -45,6 +76,18 @@ export const chapterApi = {
    */
   listChapters: (novelId: string) =>
     apiClient.get<ChapterDTO[]>(`/novels/${novelId}/chapters`) as Promise<ChapterDTO[]>,
+
+  /**
+   * Get the latest draft chapter for live preview fallback
+   * GET /api/v1/novels/{novelId}/chapters?status=draft&limit=1
+   */
+  getLatestDraftChapter: async (novelId: string): Promise<ChapterDTO | null> => {
+    const data = await apiClient.get<ChapterListResponse>(
+      apiRoutes.novels.chaptersClient(novelId),
+      { params: { status: 'draft', limit: 1 } },
+    ) as ChapterListResponse
+    return data.chapters?.[0] ?? null
+  },
 
   /**
    * Get a specific chapter by number
@@ -59,6 +102,27 @@ export const chapterApi = {
    */
   updateChapter: (novelId: string, chapterNumber: number, data: UpdateChapterRequest) =>
     apiClient.put<ChapterDTO>(`/novels/${novelId}/chapters/${chapterNumber}`, data) as Promise<ChapterDTO>,
+
+  /** 仅落库指挥器微观节拍（流式生成完成后可先于正文保存调用） */
+  upsertChapterMicroBeats: (
+    novelId: string,
+    chapterNumber: number,
+    micro_beats: ChapterMicroBeatPayload[],
+  ) =>
+    apiClient.put<{ ok: boolean; chapter_number: number; count: number }>(
+      `/novels/${novelId}/chapters/${chapterNumber}/micro-beats`,
+      { micro_beats },
+    ) as Promise<{ ok: boolean; chapter_number: number; count: number }>,
+
+  /**
+   * 更新章节生成约束（用户手写指令，直注 AI 上下文）
+   * PATCH /api/v1/novels/{novelId}/chapters/{chapterNumber}/hint
+   */
+  updateGenerationHint: (novelId: string, chapterNumber: number, generationHint: string) =>
+    apiClient.patch<ChapterDTO>(
+      `/novels/${novelId}/chapters/${chapterNumber}/hint`,
+      { generation_hint: generationHint },
+    ) as Promise<ChapterDTO>,
 
   /**
    * Get chapter review
@@ -89,9 +153,25 @@ export const chapterApi = {
     apiClient.get<ChapterStructureDTO>(`/novels/${novelId}/chapters/${chapterNumber}/structure`) as Promise<ChapterStructureDTO>,
 
   /**
+   * 保存后自动护栏快照（建议模式）。尚无快照时服务端返回 JSON null（HTTP 200）。
+   * GET /novels/{novelId}/chapters/{chapterNumber}/guardrail-snapshot
+   */
+  getGuardrailSnapshot: async (
+    novelId: string,
+    chapterNumber: number
+  ): Promise<GuardrailCheckResponse | null> => {
+    const data = (await apiClient.get(
+      `/novels/${novelId}/chapters/${chapterNumber}/guardrail-snapshot`
+    )) as GuardrailCheckResponse | null
+    return data ?? null
+  },
+
+  /**
    * 确保章节在正文库中存在；若不存在则创建空白记录
    * POST /api/v1/novels/{novelId}/chapters/{chapterNumber}/ensure
    */
   ensureChapter: (novelId: string, chapterNumber: number, title = '') =>
     apiClient.post<ChapterDTO>(`/novels/${novelId}/chapters/${chapterNumber}/ensure`, { title }) as Promise<ChapterDTO>,
+
+  subscribeStream: subscribeChapterStreamRequest,
 }

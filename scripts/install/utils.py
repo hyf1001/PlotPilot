@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-aitex 通用工具函数
+PlotPilot 通用工具函数
 ━━━━━━━━━━━━━━━━━━
 端口检测、进程管理、锁文件、Python 查找等
 不依赖 tkinter，可在纯控制台环境下使用。
@@ -28,18 +28,16 @@ except Exception:
 # ══════════════════════════════════════════════
 
 def get_proj_dir():
-    """返回项目根目录（aitex/）
+    """返回项目根目录（Plotpilot/）
 
     兼容 3 种环境:
-      - PyInstaller exe: exe所在目录的上2级 (tools/aitext/ -> 项目根)
+      - PyInstaller exe: exe 所在目录的上级链中，含 requirements.txt 的目录为项目根（常见布局 tools/plotpilot/）
       - 普通 Python: __file__ 往上3级 (install -> scripts -> 项目根)
     """
     if getattr(sys, 'frozen', False):
-        # PyInstaller 打包后: exe 在 dist/aitext/aitext.exe
+        # PyInstaller 打包后: exe 在 dist/plotpilot/plotpilot.exe
         # 项目根 = exe 的父目录的父目录
-        # 但如果 exe 被复制到了 tools/aitext/ 下，
-        # 则项目根 = exe目录 的上级的上级
-        # 更健壮的方式: 找 exe 目录中包含 requirements.txt 的最近祖先
+        # 若 exe 被复制到 tools/plotpilot/ 下，仍通过向上搜索 requirements.txt 定位根目录
         exe_dir = os.path.dirname(sys.executable)
         # 向上搜索包含 requirements.txt 的目录
         d = exe_dir
@@ -150,7 +148,7 @@ DEFAULT_PORT = 8005
 # 进程 & 锁文件
 # ══════════════════════════════════════════════
 
-LOCK_FILE = "aitext.lock"
+LOCK_FILE = "plotpilot.lock"
 
 
 def read_lock(proj_dir=None):
@@ -232,83 +230,116 @@ def kill_process(pid, timeout=3):
 # Python 环境检测
 # ══════════════════════════════════════════════
 
+PREFERRED_PYTHON = (3, 14)
+PREFERRED_PYTHON_LABEL = "Python 3.14.5"
+PREFERRED_PYTHON_EMBED_ZIP = "python-3.14.5-embed-amd64.zip"
+
+
+def python_version_tuple(ver_str):
+    """从 Python 版本文本中解析出 (major, minor, patch)。"""
+    if not ver_str:
+        return None
+    import re
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", ver_str)
+    if not match:
+        return None
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3) or 0),
+    )
+
+
+def is_preferred_python_version(ver_str):
+    """当前项目要求使用 Python 3.14 系列。"""
+    parsed = python_version_tuple(ver_str)
+    return bool(parsed and parsed[:2] == PREFERRED_PYTHON)
+
+
+def _configured_python_candidates(proj_dir):
+    """返回显式配置的 Python 3.14 候选，优先于 PATH 与 WindowsApps 别名。"""
+    candidates = []
+    env_python = os.environ.get("PLOTPILOT_PYTHON_EXE") or os.environ.get("PYTHON314_EXE")
+    if env_python:
+        candidates.append(env_python)
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(os.path.join(local_app_data, "Programs", "Python", "Python314", "python.exe"))
+        candidates.append(os.path.join(local_app_data, "Programs", "Python", "Python314", "pythonw.exe"))
+
+    candidates.extend([
+        os.path.join(proj_dir, ".venv", "Scripts", "python.exe"),
+        os.path.join(proj_dir, "tools", "python_embed", "python.exe"),
+        r"C:\Program Files\Python314\python.exe",
+        r"C:\Python314\python.exe",
+    ])
+    return candidates
+
+
 def find_python():
     """
-    查找可用的 Python 解释器。
-    返回 (path, version_str) 或 (None, error_msg)
+    查找当前项目可用的 Python 解释器。
 
-    优先级（从高到低）:
-      0. 内嵌 Python (tools/python_embed/python.exe) — 自动解压自 zip
-      1. 虚拟环境 .venv
-      2. 系统 Python 3.10+ (PATH / py launcher)
-      3. 系统 Python 任何版本（兜底）
+    当前项目固定优先使用 Python 3.14 系列，避免 WindowsApps 的 python.exe
+    别名把服务带回旧版本。返回 (path_or_command, version_str)，失败
+    时返回 (None, error_msg)。
     """
     proj_dir = get_proj_dir()
+    rejected = []
 
-    # 辅助函数：检查版本是否 >= 3.10
-    def _version_ok(ver_str):
-        if not ver_str:
-            return False
-        try:
-            parts = ver_str.split()[-1].split(".")[:2]
-            maj, min_ = int(parts[0]), int(parts[1])
-            return (maj, min_) >= (3, 10)
-        except (ValueError, IndexError):
-            return False
+    def _accept(candidate, label=None):
+        if not candidate:
+            return None
+        if isinstance(candidate, str) and os.path.sep in candidate and not os.path.exists(candidate):
+            return None
+        ver = _get_version(candidate)
+        if not ver:
+            return None
+        if is_preferred_python_version(ver):
+            return candidate, ver
+        rejected.append(f"{label or candidate} => {ver}")
+        return None
 
-    # ══════════════════════════════════════════════
-    # 0) 内嵌 Python（最高优先级！自带 3.11）
-    # ══════════════════════════════════════════════
-    embedded = _find_embedded_python(proj_dir)
-    if embedded:
-        return embedded
+    # 1) 显式配置、标准安装路径、项目 venv、内嵌 Python。
+    for candidate in _configured_python_candidates(proj_dir):
+        accepted = _accept(candidate)
+        if accepted:
+            return accepted
 
-    # 1) 虚拟环境
-    venv_py = get_venv_python(proj_dir)
-    if venv_py:
-        ver = _get_version(venv_py)
-        if ver:
-            return venv_py, ver
-
-    # 2) 系统 PATH — 收集所有候选
-    candidates = []
-    for cmd in ("python", "python3"):
-        path = shutil.which(cmd)
-        if path:
-            ver = _get_version(path)
-            if ver:
-                candidates.append((path, ver))
-
-    # Windows: py launcher
+    # 2) Windows py launcher：优先 3.14，避免旧版本被误选。
     if os.name == "nt":
-        for ver_flag in ("3.12", "3.11", "3.10", "3.13", "3"):
+        for ver_flag in ("3.14", "3"):
             try:
+                command = f"py -{ver_flag}"
                 r = subprocess.run(
                     ["py", f"-{ver_flag}", "--version"],
                     capture_output=True, text=True, timeout=5,
                     creationflags=NO_WIN,
                 )
                 ver = (r.stdout + r.stderr).strip()
-                if ver and _version_ok(ver):
-                    return (f"py -{ver_flag}", ver)
+                if ver and is_preferred_python_version(ver):
+                    return command, ver
+                if ver:
+                    rejected.append(f"{command} => {ver}")
             except Exception:
                 pass
 
-    # 从 PATH 候选中优先返回 3.10+
-    for path, ver in candidates:
-        if _version_ok(ver):
-            return path, ver
+    # 3) PATH 候选。WindowsApps 别名只有在实际版本也是 3.14 时才接受。
+    for cmd in ("python", "python3"):
+        path = shutil.which(cmd)
+        accepted = _accept(path, cmd)
+        if accepted:
+            return accepted
 
-    # 兜底
-    if candidates:
-        return candidates[0]
-
-    return None, "未找到 Python，请先安装 Python 3.10+"
-
+    detail = "; ".join(rejected[:6])
+    if detail:
+        return None, f"未找到 {PREFERRED_PYTHON_LABEL}；已忽略非目标版本: {detail}"
+    return None, f"未找到 {PREFERRED_PYTHON_LABEL}，请安装并确认 Python314 路径可用"
 
 def _find_embedded_python(proj_dir):
     """
-    查找内嵌的 Python（自带的 3.11 embeddable）。
+    查找内嵌的 Python（自带的 3.14.5 embeddable）。
 
     优先从 tools/python_embed/ 查找（首次启动时自动解压自 zip），
     其次查找 PyInstaller 打包后的路径。
@@ -382,9 +413,18 @@ def ensure_embedded_python(proj_dir=None, on_log=None):
         _embed_dir = os.path.join(tools_dir, "python_embed")
         _py_exe = os.path.join(_embed_dir, "python.exe")
 
-        # 已存在 → 直接通过
+        # 已存在 → 必须确认是项目要求的 Python 3.14 系列，避免旧内嵌包继续被复用。
         if os.path.exists(_py_exe):
-            return True
+            ver = _get_version(_py_exe)
+            if is_preferred_python_version(ver):
+                return True
+            _log(
+                f"已存在内嵌 Python 但版本不是 {PREFERRED_PYTHON_LABEL}: {ver or '无法识别'}，将尝试重新解压",
+                "warn",
+            )
+            if embed_dir is None:
+                embed_dir = _embed_dir
+                py_exe = _py_exe
 
         # 记录第一个可写的解压目标（优先项目目录）
         if embed_dir is None:
@@ -400,29 +440,37 @@ def ensure_embedded_python(proj_dir=None, on_log=None):
             except (OSError, PermissionError):
                 pass
 
-        # 查找 zip 文件
+        # 只接受当前项目固定的 Python 3.14.5 内嵌包，避免误解压旧 zip。
         if not zip_file and os.path.isdir(tools_dir):
-            for f in os.listdir(tools_dir):
-                if re.match(r'python-\d+\.\d+\.\d+-embed-amd64\.zip$', f):
-                    zip_file = os.path.join(tools_dir, f)
-                    break
+            preferred_zip = os.path.join(tools_dir, PREFERRED_PYTHON_EMBED_ZIP)
+            if os.path.exists(preferred_zip):
+                zip_file = preferred_zip
 
     # 已有可写目标 + 找到 zip → 解压
     if embed_dir and zip_file:
         import zipfile
         _log(f"正在解压 Python 内嵌包: {os.path.basename(zip_file)}...", "title")
         try:
+            if os.path.isdir(embed_dir):
+                shutil.rmtree(embed_dir)
             os.makedirs(embed_dir, exist_ok=True)
             with zipfile.ZipFile(zip_file, 'r') as zf:
                 zf.extractall(embed_dir)
-            _log("Python 内嵌包解压完成 ✓", "ok")
+            extracted_ver = _get_version(py_exe)
+            if not is_preferred_python_version(extracted_ver):
+                _log(
+                    f"Python 内嵌包解压后版本仍不符合要求: {extracted_ver or '无法识别'}",
+                    "error",
+                )
+                return False
+            _log(f"Python 内嵌包解压完成 ✓ ({extracted_ver})", "ok")
             return True
         except Exception as e:
             _log(f"解压失败: {e}", "error")
             return False
 
     if not zip_file:
-        _log("未找到 Python embed 包 (zip)，将使用系统 Python", "warn")
+        _log(f"未找到 {PREFERRED_PYTHON_EMBED_ZIP}，将使用系统 Python", "warn")
     return False
 
 

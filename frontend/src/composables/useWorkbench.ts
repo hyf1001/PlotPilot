@@ -1,25 +1,13 @@
-import { ref, computed } from 'vue'
+import { ref, computed, toValue, type MaybeRefOrGetter } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import { workflowApi } from '../api/workflow'
-import { novelApi } from '../api/novel'
+import { novelApi, type GenerationPrefsDTO } from '../api/novel'
 import { chapterApi } from '../api/chapter'
 import { useStatsStore } from '../stores/statsStore'
+import { formatApiError, getHttpStatus } from '../utils/apiError'
 
 // Constants
 const STATS_DAYS = 30
-
-function formatApiErrorDetail(error: unknown): string {
-  const e = error as { response?: { data?: { detail?: unknown } }; message?: string }
-  const d = e?.response?.data?.detail
-  if (typeof d === 'string' && d.trim()) return d
-  if (Array.isArray(d)) {
-    const parts = d.map((x: { msg?: string }) => (typeof x?.msg === 'string' ? x.msg : JSON.stringify(x)))
-    return parts.join('; ') || ''
-  }
-  if (e?.message && typeof e.message === 'string') return e.message
-  return ''
-}
 
 // Type definitions
 export interface BookMeta {
@@ -28,7 +16,8 @@ export interface BookMeta {
 }
 
 export interface UseWorkbenchOptions {
-  slug: string
+  /** 支持 `computed(() => route.params.slug)`，换书时 API 始终用当前 slug */
+  slug: MaybeRefOrGetter<string>
 }
 
 export function useWorkbench(options: UseWorkbenchOptions) {
@@ -41,16 +30,16 @@ export function useWorkbench(options: UseWorkbenchOptions) {
   const bookTitle = ref('')
   const chapters = ref<{ id: number; number: number; title: string; word_count: number }[]>([])
   const bookMeta = ref<BookMeta>({})
+  /** 本书展示偏好（阶段/章标签等），与 NovelDTO.generation_prefs 对齐 */
+  const generationPrefs = ref<GenerationPrefsDTO>({})
   const pageLoading = ref(true)
   const currentChapterId = ref<number | null>(null)
   const chapterContent = ref('')
   const chapterLoading = ref(false)
+  const currentJobId = ref<string | null>(null)
 
   /** 右栏子面板 id，与 SettingsPanel 中 foundation / narrative / tactical 的 tab name 一致 */
   const rightPanel = ref<string>('bible')
-  const biblePanelKey = ref(0)
-  const currentJobId = ref<string | null>(null)
-
 
   const hasStructure = computed(() => {
     return bookMeta.value.has_bible || bookMeta.value.has_outline
@@ -61,13 +50,14 @@ export function useWorkbench(options: UseWorkbenchOptions) {
   }
 
   const loadDesk = async () => {
+    const novelId = toValue(slug)
     // Use new novelApi and chapterApi instead of bookApi.getDesk
     const [novelData, chaptersData] = await Promise.all([
-      novelApi.getNovel(slug),
-      chapterApi.listChapters(slug)
+      novelApi.getNovel(novelId),
+      chapterApi.listChapters(novelId)
     ])
 
-    bookTitle.value = novelData.title || slug
+    bookTitle.value = novelData.title || novelId
 
     // Map ChapterDTO[] to the format expected by the UI
     chapters.value = chaptersData.map(ch => ({
@@ -82,6 +72,10 @@ export function useWorkbench(options: UseWorkbenchOptions) {
       has_bible: novelData.has_bible,
       has_outline: novelData.has_outline,
     }
+
+    const gp = novelData.generation_prefs
+    generationPrefs.value =
+      gp && typeof gp === 'object' ? (gp as GenerationPrefsDTO) : {}
   }
 
   const loadData = async (includeStats = false) => {
@@ -89,7 +83,7 @@ export function useWorkbench(options: UseWorkbenchOptions) {
     try {
       const promises: Promise<unknown>[] = [loadDesk()]
       if (includeStats) {
-        promises.push(statsStore.loadBookAllStats(slug, STATS_DAYS, true))
+        promises.push(statsStore.loadBookAllStats(toValue(slug), STATS_DAYS, true))
       }
       await Promise.all(promises)
     } finally {
@@ -99,12 +93,12 @@ export function useWorkbench(options: UseWorkbenchOptions) {
 
   const handleJobCompleted = async () => {
     // Notify stats store to invalidate cache and reload
-    statsStore.onJobCompleted(slug)
+    statsStore.onJobCompleted(toValue(slug))
     // Refresh workbench data
     await loadDesk()
-    // Force Bible panel refresh if visible
+    // 作品设定页若已挂载：软刷新 Bible（避免整组件 :key 重建导致闪烁）
     if (rightPanel.value === 'bible') {
-      biblePanelKey.value += 1
+      window.dispatchEvent(new CustomEvent('plotpilot:bible-panel:soft-reload'))
     }
   }
 
@@ -123,9 +117,8 @@ export function useWorkbench(options: UseWorkbenchOptions) {
    * 判断错误是否为 404（后端 EntityNotFoundError / HTTP 404）
    */
   function is404(error: unknown): boolean {
-    const e = error as { response?: { status?: number }; message?: string }
-    if (e?.response?.status === 404) return true
-    const detail = formatApiErrorDetail(error)
+    if (getHttpStatus(error) === 404) return true
+    const detail = formatApiError(error)
     return /not\s*found|不存在/i.test(detail)
   }
 
@@ -136,12 +129,13 @@ export function useWorkbench(options: UseWorkbenchOptions) {
     }
 
     chapterLoading.value = true
+    const novelId = toValue(slug)
     try {
-      let chapter = await chapterApi.getChapter(slug, id).catch(async (err) => {
+      let chapter = await chapterApi.getChapter(novelId, id).catch(async (err) => {
         if (!is404(err)) throw err
         // 章节正文不存在：静默创建空白记录（对应结构树手动添加的节点）
-        await chapterApi.ensureChapter(slug, id, nodeTitle ?? '')
-        return chapterApi.getChapter(slug, id)
+        await chapterApi.ensureChapter(novelId, id, nodeTitle ?? '')
+        return chapterApi.getChapter(novelId, id)
       })
       currentChapterId.value = id
       chapterContent.value = chapter.content || ''
@@ -151,7 +145,7 @@ export function useWorkbench(options: UseWorkbenchOptions) {
         await loadDesk()
       }
     } catch (error) {
-      const detail = formatApiErrorDetail(error)
+      const detail = formatApiError(error)
       currentChapterId.value = null
       chapterContent.value = ''
       message.error(
@@ -162,6 +156,13 @@ export function useWorkbench(options: UseWorkbenchOptions) {
     } finally {
       chapterLoading.value = false
     }
+  }
+
+  /** 路由换书：清空当前章视图后重载 desk（由 Workbench watch slug 调用） */
+  const reloadDeskForSlugChange = async () => {
+    currentChapterId.value = null
+    chapterContent.value = ''
+    await loadDesk()
   }
 
   const handleChapterSelect = async (chapterId: number, title = '') => {
@@ -178,8 +179,8 @@ export function useWorkbench(options: UseWorkbenchOptions) {
     // State
     bookTitle,
     chapters,
+    generationPrefs,
     rightPanel,
-    biblePanelKey,
     pageLoading,
     bookMeta,
     currentJobId,
@@ -190,6 +191,7 @@ export function useWorkbench(options: UseWorkbenchOptions) {
     // Methods
     setRightPanel,
     loadDesk,
+    reloadDeskForSlugChange,
     handleChapterSelect,
     goHome,
     goToChapter,

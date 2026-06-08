@@ -1,4 +1,6 @@
-# 日志系统使用指南
+# PlotPilot（墨枢）日志系统使用指南
+
+> 产品对外名称为 **PlotPilot（墨枢）**。下文中的 `logs/plotpilot.log` 等为环境变量默认路径里的**历史文件名**，与运行时配置一致即可。
 
 ## 快速开始
 
@@ -8,26 +10,37 @@
 
 ```bash
 LOG_LEVEL=INFO      # 可选: DEBUG, INFO, WARNING, ERROR, CRITICAL
-LOG_FILE=logs/aitext.log
+LOG_FILE=logs/plotpilot.log
+LOG_COLOR=auto      # auto / always / never
+LOG_MAX_BYTES=10485760
+LOG_BACKUP_COUNT=5
 ```
 
 ### 2. 启动后端
+
+推荐（与根目录 README 一致，端口 **8005**）：
+
+```bash
+uvicorn interfaces.main:app --host 127.0.0.1 --port 8005 --reload
+```
+
+也可直接运行 FastAPI 入口模块（默认 **`0.0.0.0:8000`**，与上式端口不同）：
 
 ```bash
 python interfaces/main.py
 ```
 
+如需与前端开发代理一致，请改用 uvicorn 并指定 `--port 8005`，或修改 `interfaces/main.py` 末尾 `uvicorn.run` 的端口。
+
 启动时会看到：
 
 ```
-================================================================================
-🚀 BACKEND STARTING - Version: 20260406-143022
-   Timestamp: 2026-04-06 14:30:22
-   Log Level: INFO
-   Log File: logs/aitext.log
-   Python: 3.11.0
-   Working Dir: D:\CODE\aitext
-================================================================================
+14:30:22 INFO  api.main               ------------------------------------------------
+14:30:22 INFO  api.main               PlotPilot backend starting - release 1.0.2
+14:30:22 INFO  api.main                 Build:       build-20260209-1200-c4d2
+14:30:22 INFO  api.main                 Log level:   INFO
+14:30:22 INFO  api.main                 Log file:    logs/plotpilot.log
+14:30:22 INFO  api.main               ------------------------------------------------
 ```
 
 ### 3. 查看日志
@@ -41,17 +54,17 @@ python scripts/tail_logs.py
 **查看最近 100 行：**
 
 ```bash
-python scripts/tail_logs.py logs/aitext.log 100
+python scripts/tail_logs.py logs/plotpilot.log 100
 ```
 
 **使用系统命令：**
 
 ```bash
 # Windows PowerShell
-Get-Content logs/aitext.log -Tail 50 -Wait
+Get-Content logs/plotpilot.log -Tail 50 -Wait
 
 # Git Bash
-tail -f logs/aitext.log
+tail -f logs/plotpilot.log
 ```
 
 ### 4. 健康检查
@@ -77,29 +90,35 @@ python scripts/check_health.py
 ### 后端启动日志
 
 ```
-14:30:22 [INFO] __main__ - 🚀 BACKEND STARTING - Version: 20260406-143022
-14:30:23 [INFO] __main__ - ✅ FastAPI application started successfully
-14:30:23 [INFO] __main__ - 📊 Registered 87 routes
+14:30:22 INFO  api.main               PlotPilot backend starting - release 1.0.2
+14:30:23 INFO  api.main               FastAPI application started successfully
+14:30:23 INFO  api.main               Registered 87 routes
 ```
 
 ### 自动驾驶守护进程日志
 
 ```
-14:30:25 [INFO] autopilot_daemon - 🚀 Autopilot Daemon Started
-14:30:25 [INFO] autopilot_daemon -    Poll Interval: 5s
-14:30:30 [INFO] autopilot_daemon - 🔄 Loop #1: 发现 2 本活跃小说
-14:30:30 [INFO] autopilot_daemon - [novel-123] ✍️  开始写作 (第 2 幕)
-14:30:30 [INFO] autopilot_daemon - [novel-123] 📖 开始写第 15 章：主角突破境界...
-14:30:45 [INFO] autopilot_daemon - [novel-123]    ✅ 节拍 1/5 完成: 523 字
-14:31:51 [INFO] autopilot_daemon - [novel-123] 🎉 第 15 章完成：2525 字 (共 15/50 章)
+14:30:25 INFO  runtime.daemon_host    Autopilot daemon started
+14:30:25 INFO  runtime.daemon_host    Poll interval: 5s
+14:30:30 INFO  runtime.daemon_host    Loop #1: 发现 2 本活跃小说
+14:30:30 INFO  runtime.writing        [novel-123] 开始写作 (第 2 幕)
+14:30:30 INFO  runtime.writing        [novel-123] 开始写第 15 章：主角突破境界...
+14:30:45 INFO  runtime.writing        [novel-123] 节拍 1/5 完成: 523 字
+14:31:51 INFO  runtime.writing        [novel-123] 第 15 章完成：2525 字 (共 15/50 章)
 ```
 
 ### 错误日志
 
 ```
-14:32:15 [ERROR] autopilot_daemon - ❌ [novel-456] 处理失败: Connection timeout
-14:32:15 [WARNING] autopilot_daemon - ⚠️  [novel-456] 连续失败 1/3 次
-14:32:25 [ERROR] autopilot_daemon - 🚨 [novel-456] 连续失败 3 次，挂起等待急救
+14:32:15 ERROR runtime.daemon_host    [novel-456] 处理失败: Connection timeout
+14:32:15 WARN  runtime.daemon_host    [novel-456] 连续失败 1/3 次
+14:32:25 ERROR runtime.daemon_host    [novel-456] 连续失败 3 次，挂起等待急救
+```
+
+文件日志会使用更适合检索的格式，包含毫秒、进程号、模块名与代码位置，例如：
+
+```
+2026-04-06 14:32:15.128 ERROR pid=18420  runtime.daemon_host          daemon_host.py:606       [novel-456] 处理失败: Connection timeout
 ```
 
 ## 调试技巧
@@ -108,22 +127,22 @@ python scripts/check_health.py
 
 ```bash
 # Windows PowerShell
-Select-String -Path logs/aitext.log -Pattern "novel-123"
+Select-String -Path logs/plotpilot.log -Pattern "novel-123"
 
 # Git Bash
-grep "novel-123" logs/aitext.log
+grep "novel-123" logs/plotpilot.log
 ```
 
 ### 只看错误日志
 
 ```bash
-grep -E "ERROR|WARNING" logs/aitext.log
+grep -E "ERROR|WARNING" logs/plotpilot.log
 ```
 
 ### 统计章节完成数
 
 ```bash
-grep "章完成" logs/aitext.log | wc -l
+grep "章完成" logs/plotpilot.log | wc -l
 ```
 
 ## 监控建议

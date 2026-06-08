@@ -1,82 +1,179 @@
 <template>
   <div class="right-panel">
-    <!-- 章节上下文（当有章节时显示） -->
-    <div v-if="currentChapter" class="chapter-context-bar">
-      <span class="chapter-context-label">第{{ currentChapter.number }}章</span>
-      <n-tag
-        :type="currentChapter.word_count > 0 ? 'success' : 'default'"
-        size="tiny"
-        round
+    <!-- Tab 分组切换器 -->
+    <div class="tab-group-bar">
+      <button
+        v-for="g in TAB_GROUPS"
+        :key="g.value"
+        class="tab-group-btn"
+        :class="{ 'tab-group-btn--active': activeGroup === g.value }"
+        @click="switchGroup(g.value)"
       >
-        {{ currentChapter.word_count > 0 ? '已收稿' : '未收稿' }}
-      </n-tag>
+        {{ g.label }}
+      </button>
+      <button class="tab-collapse-btn" title="收起面板" @click="emit('collapse')">▶</button>
     </div>
 
-    <!-- 扁平化单层标签栏，使用 display-directive="if" 避免图表组件在 display:none 状态下挂载导致 width/height 为 0 -->
+    <!-- 写作支撑组：当前语境 / 伏笔账本 / 故事演进 -->
     <n-tabs
-      v-model:value="activeTab"
+      v-show="activeGroup === 'writing'"
+      v-model:value="activeWritingTab"
       type="line"
       size="small"
       class="settings-tabs"
       :tabs-padding="4"
+      @update:value="onTabActivated"
     >
-      <n-tab-pane name="bible" tab="作品设定" display-directive="if">
-        <BiblePanel :key="bibleKey" :slug="slug" />
+      <n-tab-pane name="narrative-brief" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><SparklesOutline /></n-icon>叙事简报
+          </span>
+        </template>
+        <NarrativeDashboardPanel
+          v-if="visited.has('narrative-brief')"
+          :slug="slug"
+          :current-chapter="currentChapter ?? null"
+        />
       </n-tab-pane>
-      <n-tab-pane name="worldbuilding" tab="世界观" display-directive="if">
-        <WorldbuildingPanel :slug="slug" />
+
+      <n-tab-pane name="context" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><FlashOutline /></n-icon>当前语境
+          </span>
+        </template>
+        <CurrentChapterContextPanel
+          v-if="visited.has('context')"
+          :slug="slug"
+          :current-chapter="currentChapter ?? null"
+          :generation-prefs="generationPrefs"
+          @jump-tab="onJumpTab"
+        />
       </n-tab-pane>
-      <n-tab-pane name="knowledge" tab="知识库" display-directive="if">
+
+      <n-tab-pane name="foreshadow" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><BookmarkOutline /></n-icon>伏笔账本
+            <span v-if="pendingForeshadowCount > 0" class="tab-badge">
+              {{ pendingForeshadowCount > 99 ? '99+' : pendingForeshadowCount }}
+            </span>
+          </span>
+        </template>
+        <ForeshadowLedgerPanel
+          v-if="visited.has('foreshadow')"
+          :slug="slug"
+          :current-chapter-number="currentChapter?.number ?? null"
+          @pending-count="pendingForeshadowCount = $event"
+        />
+      </n-tab-pane>
+
+      <!-- 故事演进含图表，保留 if 确保 DOM 宽度正确 -->
+      <n-tab-pane name="story-evolution" display-directive="if">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><GitBranchOutline /></n-icon>故事演进
+          </span>
+        </template>
+        <StoryEvolutionPanel :slug="slug" :current-chapter="currentChapter?.number ?? null" />
+      </n-tab-pane>
+    </n-tabs>
+
+    <!-- 作品基础组：作品设定 / 世界观 / 知识库 / 角色档案 / 手稿道具 -->
+    <n-tabs
+      v-show="activeGroup === 'reference'"
+      v-model:value="activeReferenceTab"
+      type="line"
+      size="small"
+      class="settings-tabs"
+      :tabs-padding="4"
+      @update:value="onTabActivated"
+    >
+      <n-tab-pane name="bible" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><DocumentTextOutline /></n-icon>作品设定
+          </span>
+        </template>
+        <BiblePanel v-if="visited.has('bible')" :slug="slug" />
+      </n-tab-pane>
+
+      <n-tab-pane name="worldbuilding" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><EarthOutline /></n-icon>世界观
+          </span>
+        </template>
+        <WorldbuildingPanel v-if="visited.has('worldbuilding')" :slug="slug" />
+      </n-tab-pane>
+
+      <!-- 知识库含关系图，保留 if -->
+      <n-tab-pane name="knowledge" display-directive="if">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><LibraryOutline /></n-icon>知识库
+          </span>
+        </template>
         <KnowledgePanel :slug="slug" />
       </n-tab-pane>
-      <n-tab-pane name="storyline-arc" tab="故事线" display-directive="if">
-        <StorylinePlotOverviewPanel :slug="slug" :current-chapter="currentChapter?.number ?? null" />
+
+      <n-tab-pane name="sandbox" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><PeopleOutline /></n-icon>角色档案
+          </span>
+        </template>
+        <CharacterDialoguePanel
+          v-if="visited.has('sandbox')"
+          :slug="slug"
+          :current-chapter-number="currentChapter?.number ?? null"
+        />
       </n-tab-pane>
-      <n-tab-pane name="chronicles" tab="编年史" display-directive="if">
-        <HolographicChroniclesPanel :slug="slug" />
-      </n-tab-pane>
-      <n-tab-pane name="sandbox" tab="对话沙盒" display-directive="if">
-        <SandboxDialoguePanel :slug="slug" />
-      </n-tab-pane>
-      <n-tab-pane name="foreshadow" tab="伏笔账本" display-directive="if">
-        <ForeshadowLedgerPanel :slug="slug" />
+
+      <n-tab-pane name="props" display-directive="show">
+        <template #tab>
+          <span class="tab-label">
+            <n-icon size="13" class="tab-icon"><BriefcaseOutline /></n-icon>手稿道具
+          </span>
+        </template>
+        <ManuscriptPropsPanel
+          v-if="visited.has('props')"
+          :slug="slug"
+          :current-chapter="currentChapter"
+        />
       </n-tab-pane>
     </n-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
+import {
+  FlashOutline, BookmarkOutline, GitBranchOutline,
+  DocumentTextOutline, EarthOutline, LibraryOutline,
+  PeopleOutline, BriefcaseOutline, SparklesOutline,
+} from '@vicons/ionicons5'
 import BiblePanel from '../panels/BiblePanel.vue'
+import ManuscriptPropsPanel from './ManuscriptPropsPanel.vue'
 import KnowledgePanel from '../knowledge/KnowledgePanel.vue'
 import WorldbuildingPanel from './WorldbuildingPanel.vue'
-import StorylinePlotOverviewPanel from './StorylinePlotOverviewPanel.vue'
-import HolographicChroniclesPanel from './HolographicChroniclesPanel.vue'
+import StoryEvolutionPanel from './StoryEvolutionPanel.vue'
 import ForeshadowLedgerPanel from './ForeshadowLedgerPanel.vue'
-import SandboxDialoguePanel from './SandboxDialoguePanel.vue'
+import CharacterDialoguePanel from './CharacterDialoguePanel.vue'
+import CurrentChapterContextPanel from './CurrentChapterContextPanel.vue'
+import NarrativeDashboardPanel from './NarrativeDashboardPanel.vue'
+import type { GenerationPrefsDTO } from '@/api/novel'
+import {
+  resolveTabName,
+  tabGroup,
+  type TabGroup,
+} from '@/constants/workbenchTabs'
 
-/** 所有合法 tab 名 */
-const ALL_TABS = new Set([
-  'bible', 'worldbuilding', 'knowledge',
-  'storyline-arc', 'chronicles',
-  'sandbox', 'foreshadow',
-])
-
-/** 旧版 tab 名映射到新 tab 名 */
-const LEGACY_TAB_MAP: Record<string, string> = {
-  'storylines': 'storyline-arc',
-  'plot-arc': 'storyline-arc',
-  'timeline': 'chronicles',
-  'snapshots': 'chronicles',
-  'foreshadow-suggestions': 'sandbox',
-  'macro-refactor': 'bible',
-}
-
-function resolveTab(panel: string | undefined): string {
-  if (!panel) return 'bible'
-  if (ALL_TABS.has(panel)) return panel
-  return LEGACY_TAB_MAP[panel] ?? 'bible'
-}
+const TAB_GROUPS = [
+  { value: 'writing' as TabGroup,   label: '写作支撑' },
+  { value: 'reference' as TabGroup, label: '作品基础' },
+]
 
 interface Chapter {
   id: number
@@ -88,28 +185,70 @@ interface Chapter {
 interface Props {
   slug: string
   currentPanel?: string
-  bibleKey?: number
   currentChapter?: Chapter | null
+  generationPrefs?: GenerationPrefsDTO | null
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  currentPanel: 'bible',
-  bibleKey: 0,
+  currentPanel: 'context',
   currentChapter: null,
+  generationPrefs: null,
 })
 
 const emit = defineEmits<{
   'update:currentPanel': [panel: string]
+  'collapse': []
 }>()
 
-const activeTab = ref(resolveTab(props.currentPanel))
+const initialTab = resolveTabName(props.currentPanel)
+const initialGroup = tabGroup(initialTab)
+
+const activeGroup = ref<TabGroup>(initialGroup)
+const activeWritingTab = ref(initialGroup === 'writing' ? initialTab : 'narrative-brief')
+const activeReferenceTab = ref(initialGroup === 'reference' ? initialTab : 'bible')
+const visited = reactive(new Set<string>([initialTab]))
+const pendingForeshadowCount = ref(0)
+
+const activeTab = computed(() =>
+  activeGroup.value === 'writing' ? activeWritingTab.value : activeReferenceTab.value
+)
+
+function switchGroup(group: TabGroup) {
+  activeGroup.value = group
+  const tab = activeTab.value
+  visited.add(tab)
+  emit('update:currentPanel', tab)
+}
+
+function onTabActivated(name: string | number) {
+  const tab = String(name)
+  visited.add(tab)
+  emit('update:currentPanel', tab)
+}
+
+function onJumpTab(tabName: string) {
+  const target = resolveTabName(tabName)
+  const group = tabGroup(target)
+  activeGroup.value = group
+  if (group === 'writing') {
+    activeWritingTab.value = target
+  } else {
+    activeReferenceTab.value = target
+  }
+  visited.add(target)
+  emit('update:currentPanel', target)
+}
 
 watch(() => props.currentPanel, (newVal) => {
-  activeTab.value = resolveTab(newVal)
-})
-
-watch(activeTab, (tab) => {
-  emit('update:currentPanel', tab)
+  const target = resolveTabName(newVal)
+  const group = tabGroup(target)
+  activeGroup.value = group
+  if (group === 'writing') {
+    activeWritingTab.value = target
+  } else {
+    activeReferenceTab.value = target
+  }
+  visited.add(target)
 })
 </script>
 
@@ -120,28 +259,90 @@ watch(activeTab, (tab) => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--aitext-panel-muted);
-  border-left: 1px solid var(--aitext-split-border);
+  background: var(--plotpilot-panel-muted);
+  border-left: 1px solid var(--plotpilot-split-border);
 }
 
-/* 当前章节上下文提示条 */
-.chapter-context-bar {
+/* 分组切换栏 */
+.tab-group-bar {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
+  gap: 2px;
+  padding: 6px 8px 5px;
   background: var(--app-surface);
-  border-bottom: 1px solid var(--aitext-split-border);
+  border-bottom: 1px solid var(--plotpilot-split-border);
   flex-shrink: 0;
+}
+
+.tab-group-btn {
+  flex: 1;
+  padding: 4px 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
   font-size: 12px;
   color: var(--app-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
 
-.chapter-context-label {
-  font-weight: 600;
+.tab-group-btn:hover {
+  background: var(--plotpilot-panel-muted);
   color: var(--app-text-secondary);
 }
 
+.tab-group-btn--active {
+  background: var(--plotpilot-panel-muted);
+  color: var(--app-text-primary);
+  font-weight: 600;
+}
+
+.tab-collapse-btn {
+  flex-shrink: 0;
+  width: 28px;
+  padding: 4px 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  margin-left: auto;
+}
+
+.tab-collapse-btn:hover {
+  background: var(--plotpilot-panel-muted);
+  color: var(--app-text-primary);
+}
+
+/* Tab 标签内容（图标 + 文字 + badge） */
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab-icon {
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+
+.tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--n-error-color, #e03131);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* n-tabs 充满剩余空间 */
 .settings-tabs {
   flex: 1;
   min-height: 0;
@@ -152,10 +353,11 @@ watch(activeTab, (tab) => {
 .settings-tabs :deep(.n-tabs-nav) {
   padding: 0 8px;
   background: var(--app-surface);
-  border-bottom: 1px solid var(--aitext-split-border);
+  border-bottom: 1px solid var(--plotpilot-split-border);
   overflow-x: auto;
   scrollbar-width: none;
 }
+
 .settings-tabs :deep(.n-tabs-nav::-webkit-scrollbar) {
   display: none;
 }

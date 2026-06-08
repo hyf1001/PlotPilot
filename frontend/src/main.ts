@@ -3,25 +3,23 @@ import { createPinia } from 'pinia'
 import router from './router'
 import App from './App.vue'
 
-// Naive UI
-import naive from 'naive-ui'
-
-// ECharts
-import installECharts from './plugins/echarts'
+import installNaiveComponents from './plugins/naive'
 
 // 样式
 import './assets/styles/main.css'
+import './assets/styles/tokens-layout.css'
 
 // Tauri API 初始化（动态端口、环境检测）
 import { initApiClient } from './api/config'
+import { installGlobalFeedbackIncidentCapture } from './support/feedbackGlobalInstall'
 
 async function bootstrap() {
   const app = createApp(App)
+  installGlobalFeedbackIncidentCapture(app)
 
   app.use(createPinia())
   app.use(router)
-  app.use(naive)
-  app.use(installECharts)
+  app.use(installNaiveComponents)
 
   // Tauri 下须先拿到真实端口再挂路由，否则首屏请求会打到错误 origin（抽屉/广场像「没连上库」）
   try {

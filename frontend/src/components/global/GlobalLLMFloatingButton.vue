@@ -113,8 +113,9 @@
           </div>
         </div>
       </template>
-      <div class="modal-body fab-llm-modal-body">
+      <div v-show="showPanel" class="modal-body fab-llm-modal-body">
         <LLMControlPanel
+          v-if="panelInitialized"
           scroll-state-key="global-fab-modal"
           @panel-updated="handlePanelUpdated"
         />
@@ -143,6 +144,8 @@ import {
   type LLMRuntimeSummary,
 } from '../../api/llmControl'
 import LLMControlPanel from '../workbench/LLMControlPanel.vue'
+import { storageKeys } from '@/config/storageKeys'
+import { readStorageJson, writeStorageJson } from '@/utils/storage'
 
 type DockSide = 'left' | 'right'
 type FabMode = 'expanded' | 'minimized'
@@ -154,13 +157,13 @@ interface PersistedFabState {
   mode: FabMode
 }
 
-const STORAGE_KEY = 'plotpilot.global-llm-fab.state.v4'
 const EDGE_GAP = 10
 const TOP_SAFE_GAP = 88
 const BOTTOM_SAFE_GAP = 24
 const CLICK_THRESHOLD = 6
 
 const showPanel = ref(false)
+const panelInitialized = ref(false) // 缓存面板是否已初始化
 const dragging = ref(false)
 const hovering = ref(false)
 const runtimeLoading = ref(false)
@@ -270,7 +273,7 @@ function saveState() {
     yRatio: Number(yRatio.value.toFixed(4)),
     mode: mode.value,
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+  writeStorageJson(storageKeys.globalLlmFabState, payload)
 }
 
 function applyDockPosition(shouldPersist = false) {
@@ -290,26 +293,24 @@ function defaultState() {
 
 function restoreState() {
   defaultState()
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return
-    const parsed = JSON.parse(raw) as Partial<PersistedFabState> & { mode?: string }
-    if (parsed.dock === 'left' || parsed.dock === 'right') {
-      dockSide.value = parsed.dock
-    }
-    if (parsed.mode === 'expanded' || parsed.mode === 'minimized') {
-      mode.value = parsed.mode
-    }
-    if (typeof parsed.yRatio === 'number' && Number.isFinite(parsed.yRatio)) {
-      yRatio.value = Math.min(Math.max(parsed.yRatio, 0), 1)
-    }
-  } catch {
-    defaultState()
+  const parsed = readStorageJson<Partial<PersistedFabState> & { mode?: string }>(
+    storageKeys.globalLlmFabState,
+    {},
+  )
+  if (parsed.dock === 'left' || parsed.dock === 'right') {
+    dockSide.value = parsed.dock
+  }
+  if (parsed.mode === 'expanded' || parsed.mode === 'minimized') {
+    mode.value = parsed.mode
+  }
+  if (typeof parsed.yRatio === 'number' && Number.isFinite(parsed.yRatio)) {
+    yRatio.value = Math.min(Math.max(parsed.yRatio, 0), 1)
   }
 }
 
 function openPanel() {
   void refreshRuntimeSummary()
+  panelInitialized.value = true // 首次打开时初始化，之后保持
   showPanel.value = true
 }
 
@@ -332,6 +333,7 @@ function handlePanelUpdated(data: LLMControlPanelData) {
 function handleModalShowChange(value: boolean) {
   showPanel.value = value
   if (value) {
+    panelInitialized.value = true // 确保面板已初始化
     void refreshRuntimeSummary()
   }
 }

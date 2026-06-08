@@ -2,8 +2,10 @@
 
 整合所有子项目组件，实现完整的章节生成流程。
 """
+import asyncio
 import logging
-from typing import Tuple, Dict, Any, AsyncIterator, Optional, List
+import re
+from typing import Tuple, Dict, Any, AsyncIterator, Optional, List, Callable, Awaitable
 from application.engine.services.context_builder import ContextBuilder
 from application.analyst.services.state_extractor import StateExtractor
 from application.analyst.services.state_updater import StateUpdater
@@ -24,14 +26,188 @@ from domain.novel.value_objects.novel_id import NovelId
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from application.ai.llm_output_sanitize import strip_reasoning_artifacts
+from application.ai.prose_fragment_aggregator import aggregate_inline_prose_fragments
 from application.workflows.beat_continuation import format_prior_draft_for_prompt
+from application.workflows.prose_discipline import build_prose_discipline_block
+
+from application.core.chapter_target_limits import clamp_chapter_target_words
 
 logger = logging.getLogger(__name__)
+
+
+def _beats_for_sse(beats: List[Any]) -> List[Dict[str, Any]]:
+    """指挥器微观节拍 → SSE / done 载荷（与前端 StreamGeneratedBeat 对齐）。"""
+    out: List[Dict[str, Any]] = []
+    for beat in beats or []:
+        desc = (getattr(beat, "description", None) or getattr(beat, "scene_goal", None) or "").strip()
+        if not desc:
+            continue
+        out.append(
+            {
+                "description": desc,
+                "target_words": int(getattr(beat, "target_words", 0) or 0),
+                "focus": (getattr(beat, "focus", None) or "pacing"),
+                "location_id": getattr(beat, "location_id", "") or "",
+            }
+        )
+    return out
+
+
+# ─── 模板安全渲染工具 ───
+
+class _SafeDict(dict):
+    """format_map 专用字典：未匹配的变量保留为 {name} 占位符，不抛 KeyError。"""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _render_template(template: str, variables: Dict[str, Any]) -> str:
+    """Replace {{variable_name}} placeholders with values.
+    Keeps unmatched placeholders as-is so the LLM still sees the placeholder name.
+    """
+    def _replace(match: re.Match) -> str:
+        key = match.group(1).strip()
+        return str(variables.get(key, "{{" + key + "}}"))
+    return re.sub(r'\{\{(\w+)\}\}', _replace, template)
+
+
+def _safe_format(template: str, variables: Dict[str, Any]) -> str:
+    """安全模板渲染：缺失变量保留占位符，不抛异常。
+
+    Args:
+        template: 含 {variable} 占位符的模板字符串
+        variables: 变量字典
+
+    Returns:
+        渲染后的字符串
+    """
+    if not template:
+        return ""
+    try:
+        return template.format_map(_SafeDict(variables))
+    except (KeyError, ValueError, IndexError):
+        return template
+
+
+# CPMS: 主工作流提示词节点 key（与 prompt_packages 中节点 id 一致）
+from infrastructure.ai.prompt_keys import CHAPTER_GENERATION_MAIN as _WORKFLOW_CHAPTER_GEN_NODE_KEY
+from infrastructure.ai.prompt_keys import SCRIPT_GENERATION as _SCRIPT_GEN_NODE_KEY
+from infrastructure.ai.prompt_keys import PROSE_FROM_SCRIPT as _PROSE_FROM_SCRIPT_NODE_KEY
+from infrastructure.ai.prompt_contracts.script_generation import SCRIPT_GENERATION_CONTRACT
+from infrastructure.ai.prompt_contracts.prose_from_script import PROSE_FROM_SCRIPT_CONTRACT
+from infrastructure.ai.prompt_gateway import get_prompt_gateway
+
+# 硬编码回退：system 模板框架（仅在 PromptRegistry 不可用时使用）
+_FALLBACK_SYSTEM_TEMPLATE = (
+    "你是一位专业的网络小说作家。根据以下上下文撰写章节内容。\n"
+    "{theme_persona}{theme_rules}\n"
+    "{planning_section}{voice_block}{context}\n\n"
+    "{fact_lock}\n"
+    "{shuangwen_directive}"
+    "{prose_discipline}"
+    "写作要求：\n"
+    "1. 必须有多个人物互动（至少2-3个角色出场）\n"
+    "2. 必须有对话（不能只有独白和叙述）\n"
+    "3. 必须有冲突或张力（人物之间的矛盾、目标阻碍、悬念等）\n"
+    "4. 保持人物性格一致\n"
+    "5. 推进情节发展\n"
+    "6. 使用生动的场景描写和细节\n"
+    "{length_rule}\n"
+    "8. 用中文写作，使用第三人称叙事{beat_extra}\n"
+    "{format_rules}"
+)
+
+# 硬编码回退：user 模板框架
+_FALLBACK_USER_TEMPLATE = (
+    "请根据以下大纲撰写本章内容：\n\n{outline}\n\n"
+    "关键要求（必须遵守）：\n"
+    "- 至少2-3个角色出场并互动\n"
+    "- 必须包含对话场景（不少于3段对话）\n"
+    "- 必须有明确的冲突或戏剧张力\n"
+    "- 场景要具体生动，不要空泛叙述\n"
+    "- 推进主线情节，不要原地踏步\n"
+    "- 结尾要有悬念或转折\n\n"
+    "{beat_section}"
+)
 
 # 与 ContextBuilder.build_structured_context 映射：Layer1≈T0+T1，Layer2=T2，Layer3=T3
 # 段名与语义对齐，避免「SMART RETRIEVAL」贴在近期正文等历史误标
 CHAPTER_CONTEXT_LAYER2_HEADER = "RECENT CHAPTERS"  # T2 近期章节正文
 CHAPTER_CONTEXT_LAYER3_HEADER = "VECTOR RECALL"  # T3 向量召回
+
+
+def _build_dynamic_coherence_rules(anchor) -> str:
+    """基于前节拍尾部锚点动态生成连贯性建议（V9: 从约束变为参考）
+
+    V9 改革：不再使用"必须"、"不能"等强制性语言。
+    改为温和的建议，允许 AI 灵活处理节拍间过渡。
+
+    Args:
+        anchor: BeatTailAnchor 实例
+
+    Returns:
+        格式化的连贯性建议文本
+    """
+    # 基础规则（所有情况都适用）
+    base_rules = [
+        "1. 从上文最后的情节发展自然过渡",
+    ]
+
+    # 根据尾部状态追加建议（V9: 从"必须"变为"可以"）
+    state_rules = {
+        "对话中": [
+            "2. 上文停在对白中间——你可以先回应/延续该对话",
+            "3. 对话中的情绪弦外之音建议承接",
+            "4. 对话自然结束后再推进新情节",
+        ],
+        "动作中": [
+            "2. 上文停在动作进行中——你可以展示该动作的完成或结果",
+            "3. 动作完成后写角色的反应（表情/心理/下一步）",
+            "4. 也可以跳过动作结果，从后续反应开始",
+        ],
+        "悬念中": [
+            "2. 上文留下了悬念——你可以延续悬念的紧张感",
+            "3. 可以暂时搁置悬念，从另一条线索开篇",
+            "4. 如果合适，也可以揭晓悬念",
+        ],
+        "叙述中": [
+            "2. 承接叙述的情绪惯性自然过渡",
+            "3. 从叙述自然过渡到具体场景或对话",
+            "4. 用环境细节或角色动作作为过渡桥梁",
+        ],
+        "场景转换": [
+            "2. 新场景可以先用感官细节（画面/声音/温度）站稳脚跟",
+            "3. 也可以直接进入新场景的对话/动作",
+            "4. 时间跳跃是合法的文学技法",
+        ],
+    }
+
+    extra = state_rules.get(anchor.tail_state, [
+        "2. 保持相同的场景设置，除非节拍明确要求转换场景",
+        "3. 人物情绪和状态应与上文保持一致并合理发展",
+        "4. 如果上文以对话结尾，继续该对话；如果以动作结尾，展示后续",
+    ])
+    base_rules.extend(extra)
+
+    # 情绪基调参考（V9: 删除"不能"措辞）
+    mood_hints = {
+        '紧张': "5. 情绪参考：上文紧张，紧张感通常会延续一段时间",
+        '愤怒': "5. 情绪参考：上文愤怒，余怒未消是常见的",
+        '悲伤': "5. 情绪参考：上文悲伤，悲伤有惯性",
+        '悬疑': "5. 情绪参考：上文悬疑，不要急于揭晓",
+    }
+    mood_hint = mood_hints.get(anchor.mood_tone)
+    if mood_hint:
+        base_rules.append(mood_hint)
+
+    # 最后画面参考（V9: 不再说"必须接续"）
+    if anchor.last_moment:
+        base_rules.append(
+            f"6. 📍 上文最后画面：……{anchor.last_moment}"
+        )
+
+    return "\n".join(base_rules)
 
 
 def assemble_chapter_bundle_context_text(payload: Dict[str, Any]) -> str:
@@ -93,6 +269,7 @@ class AutoNovelGenerationWorkflow:
         voice_fingerprint_service: Optional['VoiceFingerprintService'] = None,
         cliche_scanner: Optional['ClicheScanner'] = None,
         memory_engine: Optional['MemoryEngine'] = None,
+        evolution_gate_service: Optional[Any] = None,
     ):
         """初始化工作流
 
@@ -116,6 +293,7 @@ class AutoNovelGenerationWorkflow:
         self.storyline_manager = storyline_manager
         self.plot_arc_repository = plot_arc_repository
         self.llm_service = llm_service
+        self.evolution_gate_service = evolution_gate_service
 
         # ★ V6 记忆引擎（跨章节状态机）
         self.memory_engine = memory_engine
@@ -123,7 +301,7 @@ class AutoNovelGenerationWorkflow:
             # 将 memory_engine 注入 context_builder 的 budget_allocator
             if hasattr(self.context_builder, 'budget_allocator'):
                 self.context_builder.budget_allocator.memory_engine = memory_engine
-                logger.info("✓ MemoryEngine 已注入 ContextBudgetAllocator")
+                logger.info("MemoryEngine 已注入 ContextBudgetAllocator")
 
         # V6 运行时上下文缓存（供 _build_prompt 使用）
         self._current_novel_id: str = ""
@@ -155,6 +333,31 @@ class AutoNovelGenerationWorkflow:
         self.voice_fingerprint_service = voice_fingerprint_service
         self.cliche_scanner = cliche_scanner
 
+        # ★ Theme 集成器（延迟初始化）
+        self._theme_integrator = None
+        self._genre: Optional[str] = None
+
+    def set_genre(self, genre: str) -> None:
+        """设置小说题材，激活对应的 Theme Agent"""
+        self._genre = genre
+        self._initialize_theme()
+
+    def _initialize_theme(self) -> None:
+        """延迟初始化 Theme 集成器"""
+        if self._theme_integrator is not None:
+            return
+
+        try:
+            from application.engine.theme.theme_integrator import ThemeIntegrator
+            self._theme_integrator = ThemeIntegrator()
+            if self._theme_integrator.initialize(self._genre):
+                logger.info(f"Theme 集成器已初始化，题材: {self._genre or 'default'}")
+            else:
+                self._theme_integrator = None
+        except Exception as e:
+            logger.warning(f"Theme 集成器初始化失败: {e}")
+            self._theme_integrator = None
+
     def prepare_chapter_generation(
         self,
         novel_id: str,
@@ -163,6 +366,7 @@ class AutoNovelGenerationWorkflow:
         *,
         scene_director: Optional[SceneDirectorAnalysis] = None,
         max_tokens: int = 35000,
+        allow_evolution_gate_bypass: bool = False,
     ) -> Dict[str, Any]:
         """与单章 / 流式 / 托管按节拍写作同源：结构化三层上下文 + 故事线 + 张力 + 文风。
 
@@ -170,6 +374,34 @@ class AutoNovelGenerationWorkflow:
         """
         storyline_context = self._get_storyline_context(novel_id, chapter_number)
         plot_tension = self._get_plot_tension(novel_id, chapter_number)
+        evolution_gate_report = None
+        try:
+            if self.evolution_gate_service:
+                evolution_gate_report = self.evolution_gate_service.check(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    outline_content=outline,
+                    branch_id="main",
+                ).to_dict()
+                if (
+                    not allow_evolution_gate_bypass
+                    and any(
+                        v.get("level") == "blocking"
+                        for v in evolution_gate_report.get("violations", [])
+                    )
+                ):
+                    raise RuntimeError(
+                        "evolution_gate_blocked:"
+                        + "; ".join(
+                            str(v.get("message") or "")
+                            for v in evolution_gate_report.get("violations", [])
+                            if v.get("level") == "blocking"
+                        )
+                    )
+        except Exception as e:
+            if str(e).startswith("evolution_gate_blocked:"):
+                raise
+            logger.warning("EvolutionGate 写前检查跳过 novel=%s ch=%s: %s", novel_id, chapter_number, e)
         payload = self.context_builder.build_structured_context(
             novel_id=novel_id,
             chapter_number=chapter_number,
@@ -178,6 +410,19 @@ class AutoNovelGenerationWorkflow:
             scene_director=scene_director,
         )
         context = assemble_chapter_bundle_context_text(payload)
+        if evolution_gate_report:
+            blocking = [
+                v for v in evolution_gate_report.get("violations", [])
+                if v.get("level") == "blocking"
+            ]
+            gate_lines = ["=== EVOLUTION GATE ==="]
+            gate_lines.append(f"pass={evolution_gate_report.get('is_pass')}")
+            for item in blocking[:6]:
+                gate_lines.append(f"- BLOCKING {item.get('type')}: {item.get('message')}")
+            for item in evolution_gate_report.get("required_continuations", [])[:6]:
+                gate_lines.append(f"- REQUIRED: {item}")
+            if len(gate_lines) > 1:
+                context = "\n".join(gate_lines) + "\n\n" + context
         context_tokens = payload["token_usage"]["total"]
         style_summary = self._get_style_summary(novel_id)
         voice_anchors = ""
@@ -192,7 +437,41 @@ class AutoNovelGenerationWorkflow:
             "context_tokens": context_tokens,
             "style_summary": style_summary,
             "voice_anchors": voice_anchors,
+            "evolution_gate": evolution_gate_report,
+            "evolution_gate_blocked": bool(
+                evolution_gate_report
+                and any(v.get("level") == "blocking" for v in evolution_gate_report.get("violations", []))
+            ),
         }
+
+    def _resolve_target_chapter_words(self, novel_id: str) -> int:
+        """每章目标字数：与作品设置 target_words_per_chapter 一致（工作流 / API 单章生成）。"""
+        try:
+            novel = self.context_builder.novel_repository.get_by_id(NovelId(novel_id))
+            if novel is not None:
+                w = int(getattr(novel, "target_words_per_chapter", 2500) or 2500)
+                return clamp_chapter_target_words(w)
+        except Exception as e:
+            logger.debug("读取 target_words_per_chapter 失败，使用默认 2500: %s", e)
+        return 2500
+
+    def _finalize_chapter_body_text(self, novel_id: str, raw: str) -> str:
+        """推理块清洗 + 按书目偏好可选段内短句聚合。"""
+        stripped = strip_reasoning_artifacts(raw)
+        try:
+            novel = self.context_builder.novel_repository.get_by_id(NovelId(novel_id))
+            if (
+                novel is not None
+                and getattr(novel.generation_prefs, "inline_prose_aggregation_enabled", False)
+            ):
+                return aggregate_inline_prose_fragments(stripped)
+        except Exception as e:
+            logger.debug(
+                "inline_prose_aggregation 偏好读取失败，跳过聚合 novel=%s: %s",
+                novel_id,
+                e,
+            )
+        return stripped
 
     def build_fallback_chapter_bundle(
         self,
@@ -305,7 +584,8 @@ class AutoNovelGenerationWorkflow:
         chapter_number: int,
         outline: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
-        enable_beats: bool = True
+        enable_beats: bool = True,
+        allow_evolution_gate_bypass: bool = False,
     ) -> GenerationResult:
         """生成章节（完整工作流）
 
@@ -339,75 +619,38 @@ class AutoNovelGenerationWorkflow:
 
         logger.info("阶段 1-2: 规划 + 结构化上下文（prepare_chapter_generation）")
         bundle = self.prepare_chapter_generation(
-            novel_id, chapter_number, outline, scene_director=scene_director
+            novel_id,
+            chapter_number,
+            outline,
+            scene_director=scene_director,
+            allow_evolution_gate_bypass=allow_evolution_gate_bypass,
         )
         context = bundle["context"]
         context_tokens = bundle["context_tokens"]
-        logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
+        logger.info(f"上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
 
-        logger.info("阶段 3: 生成 - 调用 LLM")
+        logger.info("阶段 3: 生成 - 两阶段（剧本 → 正文）")
         config = GenerationConfig()
-        
-        # 如果使用节拍模式，先放大节拍
-        beats = []
-        if enable_beats:
-            logger.info("  → 启用节拍模式，拆分大纲为微观节拍")
-            beats = self.context_builder.magnify_outline_to_beats(chapter_number, outline)
-            logger.info(f"  ✓ 已拆分为 {len(beats)} 个微观节拍")
-        
-        # 根据是否使用节拍选择不同的生成策略
-        if enable_beats and beats:
-            # 按节拍生成
-            content_parts: list[str] = []
-            for i, beat in enumerate(beats):
-                prior_draft = "\n\n".join(content_parts)
-                beat_prompt_text = self.context_builder.build_beat_prompt(beat, i, len(beats))
-                logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - {beat.description[:50]}...")
-                
-                prompt = self._build_prompt(
-                    context,
-                    outline,
-                    storyline_context=bundle["storyline_context"],
-                    plot_tension=bundle["plot_tension"],
-                    style_summary=bundle["style_summary"],
-                    beat_prompt=beat_prompt_text,
-                    beat_index=i,
-                    total_beats=len(beats),
-                    beat_target_words=beat.target_words,
-                    voice_anchors=bundle.get("voice_anchors") or "",
-                    chapter_draft_so_far=prior_draft,
-                )
-                
-                llm_result = await self.llm_service.generate(prompt, config)
-                beat_content = llm_result.content
-                content_parts.append(beat_content)
-            
-            content = strip_reasoning_artifacts("".join(content_parts))
-            logger.info(f"  ✓ 节拍生成完成: {len(beats)} 个节拍, {len(content)} 字符")
-        else:
-            # 传统单段生成
-            prompt = self._build_prompt(
-                context,
-                outline,
-                storyline_context=bundle["storyline_context"],
-                plot_tension=bundle["plot_tension"],
-                style_summary=bundle["style_summary"],
-                voice_anchors=bundle.get("voice_anchors") or "",
-            )
-            logger.info(f"  → 发送请求到 LLM (max_tokens={config.max_tokens}, temperature={config.temperature})")
-            llm_result = await self.llm_service.generate(prompt, config)
-            content = strip_reasoning_artifacts(llm_result.content or "")
-            logger.info(f"  ✓ LLM 响应已接收: {len(content)} 字符")
-        
-        # 保存微观节拍用于后续处理
-        if beats:
-            bundle["micro_beats"] = [
-                {
-                    "description": beat.description,
-                    "target_words": beat.target_words,
-                    "focus": beat.focus
-                } for beat in beats
-            ]
+        target_words = self._resolve_target_chapter_words(novel_id)
+
+        # 阶段 3a: 生成六模块导演剧本
+        script = await self._generate_script(
+            context=context,
+            outline=outline,
+            target_words=target_words,
+            storyline_context=bundle["storyline_context"],
+            plot_tension=bundle["plot_tension"],
+            style_summary=bundle["style_summary"],
+        )
+
+        # 阶段 3b: 根据剧本生成正文（默认不注入 context，依赖剧本本身的信息）
+        raw_prose = await self._generate_prose_from_script(
+            script=script,
+            outline=outline,
+            target_words=target_words,
+        )
+        content = self._finalize_chapter_body_text(novel_id, raw_prose)
+        logger.info(f"两阶段生成完成: 剧本 {len(script)} 字符, 正文 {len(content)} 字符")
 
         logger.info("阶段 4: 后处理（post_process_generated_chapter）")
         post = await self.post_process_generated_chapter(
@@ -417,12 +660,12 @@ class AutoNovelGenerationWorkflow:
         consistency_report = post["consistency_report"]
         ghost_annotations = post["ghost_annotations"]
         if style_warnings:
-            logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+            logger.info(f"俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
 
         # Phase 5: Review - 返回结果
         logger.info(f"阶段 5: 完成 - 章节生成完成")
         token_count = context_tokens
-        logger.info(f"  ✓ 总计: {len(content)} 字符, {token_count} tokens")
+        logger.info(f"总计: {len(content)} 字符, {token_count} tokens")
         logger.info(f"========================================")
         logger.info(f"章节生成完成: 小说={novel_id}, 章节={chapter_number}")
         logger.info(f"========================================")
@@ -436,21 +679,36 @@ class AutoNovelGenerationWorkflow:
             style_warnings=style_warnings
         )
 
+
     async def generate_chapter_stream(
         self,
         novel_id: str,
         chapter_number: int,
         outline: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
-        enable_beats: bool = True
+        enable_beats: bool = True,
+        regeneration_guidance: Optional[str] = None,
+        allow_evolution_gate_bypass: bool = False,
+        profile_id: Optional[str] = None,
+        script_prompt_template: Optional[str] = None,
+        prose_prompt_template: Optional[str] = None,
+        prompt_variables: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式生成章节：阶段事件 + 正文 token 流 + 最终 done（含一致性报告）。
 
         事件类型：
-        - phase: planning | context | llm | post
-        - chunk: { text }
+        - phase: planning | context | script | prose | post
+        - chunk: { text, stage: "script"|"prose" }（剧本/正文 token）
         - done: { content, consistency_report, token_count }
         - error: { message }
+
+        Args:
+            regeneration_guidance: 重写时的改进方向（可选）。非空时 AI 会在 prompt 中看到
+                                   上一版本的问题描述，并被要求针对性改进。
+            profile_id: 覆盖 LLM 控制台档案 ID；不传则使用当前激活档案。
+            script_prompt_template: 自定义剧本提示词模板（支持 {{variable}}）。
+            prose_prompt_template: 自定义正文提示词模板（支持 {{variable}}）。
+            prompt_variables: 提示词变量键值对。
         """
         try:
             if chapter_number < 1:
@@ -466,106 +724,76 @@ class AutoNovelGenerationWorkflow:
             yield {"type": "phase", "phase": "context"}
             logger.info("阶段 1-2: prepare_chapter_generation（规划 + 结构化上下文）")
             bundle = self.prepare_chapter_generation(
-                novel_id, chapter_number, outline, scene_director=scene_director
+                novel_id,
+                chapter_number,
+                outline,
+                scene_director=scene_director,
+                allow_evolution_gate_bypass=allow_evolution_gate_bypass,
             )
             context = bundle["context"]
             context_tokens = bundle["context_tokens"]
-            logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
+            logger.info(f"上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
 
-            yield {"type": "phase", "phase": "llm"}
-            logger.info("阶段 3: 生成 - 调用 LLM 流式生成")
             config = GenerationConfig()
             chunk_count = 0
-            
-            # 如果使用节拍模式，先放大节拍
-            beats = []
-            if enable_beats:
-                logger.info("  → 启用节拍模式，拆分大纲为微观节拍")
-                beats = self.context_builder.magnify_outline_to_beats(chapter_number, outline)
-                logger.info(f"  ✓ 已拆分为 {len(beats)} 个微观节拍")
-                
-                # 发送节拍信息用于前端展示
-                yield {
-                    "type": "beats_generated",
-                    "beats": [
-                        {
-                            "description": beat.description,
-                            "target_words": beat.target_words,
-                            "focus": beat.focus
-                        } for beat in beats
-                    ]
-                }
-            
-            # 根据是否使用节拍选择不同的生成策略
-            if enable_beats and beats:
-                # 按节拍生成
-                content_parts: list[str] = []
-                for i, beat in enumerate(beats):
-                    prior_draft = "\n\n".join(content_parts)
-                    beat_prompt_text = self.context_builder.build_beat_prompt(beat, i, len(beats))
-                    logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - {beat.description[:50]}...")
-                    
-                    prompt = self._build_prompt(
-                        context,
-                        outline,
-                        storyline_context=bundle["storyline_context"],
-                        plot_tension=bundle["plot_tension"],
-                        style_summary=bundle["style_summary"],
-                        beat_prompt=beat_prompt_text,
-                        beat_index=i,
-                        total_beats=len(beats),
-                        beat_target_words=beat.target_words,
-                        voice_anchors=bundle.get("voice_anchors") or "",
-                        chapter_draft_so_far=prior_draft,
-                    )
-                    
-                    beat_content = ""
-                    async for piece in self.llm_service.stream_generate(prompt, config):
-                        chunk_count += 1
-                        beat_content += piece
-                        yield {
-                            "type": "chunk", 
-                            "text": piece,
-                            "beat_index": i,
-                            "beat_focus": beat.focus
-                        }
-                    
-                    content_parts.append(beat_content)
-                    yield {"type": "beat_done", "beat_index": i, "beat_content_length": len(beat_content)}
-                
-                content = strip_reasoning_artifacts("".join(content_parts))
-            else:
-                # 传统单段生成
-                prompt = self._build_prompt(
-                    context,
-                    outline,
-                    storyline_context=bundle["storyline_context"],
-                    plot_tension=bundle["plot_tension"],
-                    style_summary=bundle["style_summary"],
-                    voice_anchors=bundle.get("voice_anchors") or "",
-                )
-                
-                logger.info(f"  → 发送流式请求到 LLM")
-                parts: list[str] = []
-                total_chars = 0
-                async for piece in self.llm_service.stream_generate(prompt, config):
-                    parts.append(piece)
-                    chunk_count += 1
-                    total_chars += len(piece)
-                    # 增强事件：包含累计字数和预估 token（中文约 1.5 字/token，英文约 4 字/token）
-                    estimated_tokens = int(total_chars / 1.5)  # 简化估算
-                    yield {
-                        "type": "chunk", 
-                        "text": piece,
-                        "stats": {
-                            "chars": total_chars,
-                            "chunks": chunk_count,
-                            "estimated_tokens": estimated_tokens,
-                        }
-                    }
+            target_words = self._resolve_target_chapter_words(novel_id)
 
-                content = strip_reasoning_artifacts("".join(parts))
-            logger.info(f"  ✓ LLM 流式响应完成: {chunk_count} 个块, {len(content)} 字符")
+            # Resolve LLM service: profile override → dedicated provider, else system default
+            llm_service = self.llm_service
+            if profile_id:
+                try:
+                    from infrastructure.ai.provider_factory import LLMProviderFactory
+                    factory = LLMProviderFactory()
+                    llm_service = factory.create_from_profile_id(profile_id)
+                    logger.info("使用档案 %s 的独立 Provider", profile_id)
+                except Exception as exc:
+                    logger.warning("无法创建档案 Provider %s，回退系统默认: %s", profile_id, exc)
+
+            prompt_vars = prompt_variables or {}
+
+            # 两阶段流式生成：剧本 → 正文
+            yield {"type": "phase", "phase": "script"}
+            logger.info("阶段 3a: 流式生成六模块剧本")
+
+            script_parts: list[str] = []
+            async for piece in self._generate_script_stream(
+                context=context,
+                outline=outline,
+                target_words=target_words,
+                storyline_context=bundle["storyline_context"],
+                plot_tension=bundle["plot_tension"],
+                style_summary=bundle["style_summary"],
+                llm_service=llm_service,
+                custom_template=script_prompt_template,
+                custom_variables=prompt_vars,
+            ):
+                script_parts.append(piece)
+                chunk_count += 1
+                yield {"type": "chunk", "text": piece, "stage": "script"}
+
+            script = "".join(script_parts)
+            logger.info(f"  ✓ 剧本流式生成完成: {len(script)} 字符")
+
+            yield {"type": "phase", "phase": "prose"}
+            logger.info("阶段 3b: 流式生成正文（基于剧本）")
+
+            prose_parts: list[str] = []
+            async for piece in self._generate_prose_from_script_stream(
+                script=script,
+                outline=outline,
+                target_words=target_words,
+                context=context,
+                llm_service=llm_service,
+                custom_template=prose_prompt_template,
+                custom_variables=prompt_vars,
+            ):
+                prose_parts.append(piece)
+                chunk_count += 1
+                yield {"type": "chunk", "text": piece, "stage": "prose"}
+
+            content = self._finalize_chapter_body_text(novel_id, "".join(prose_parts))
+            logger.info(f"  ✓ 正文流式生成完成: {len(content)} 字符")
+            logger.info(f"LLM 流式响应完成: {chunk_count} 个块, {len(content)} 字符")
 
             if not content.strip():
                 logger.error("  × 模型返回空内容")
@@ -581,7 +809,7 @@ class AutoNovelGenerationWorkflow:
             consistency_report = post["consistency_report"]
             ghost_annotations = post["ghost_annotations"]
             if style_warnings:
-                logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+                logger.info(f"俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
 
             token_count = context_tokens
             output_tokens = int(len(content) / 1.5)  # 预估输出 token
@@ -600,6 +828,7 @@ class AutoNovelGenerationWorkflow:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
                 "chars": len(content),
+                "beats": [],
                 "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
                 "style_warnings": [
                     {
@@ -705,30 +934,114 @@ class AutoNovelGenerationWorkflow:
             return "Storyline context unavailable"
 
     def _get_plot_tension(self, novel_id: str, chapter_number: int) -> str:
-        """获取情节张力信息
+        """获取情节张力信息——融合预设锚点 + 前章实际张力评分，形成闭环反馈。
 
         Args:
             novel_id: 小说 ID
             chapter_number: 章节号
 
         Returns:
-            情节张力描述
+            情节张力描述（含预设期望 + 前章实际 + 调整指令）
         """
+        parts: list[str] = []
+
+        # 1. 预设张力（来自 PlotArc 锚点）
         try:
             plot_arc = self.plot_arc_repository.get_by_novel_id(NovelId(novel_id))
-            if plot_arc:
+            if plot_arc and plot_arc.key_points:
                 tension = plot_arc.get_expected_tension(chapter_number)
                 next_point = plot_arc.get_next_plot_point(chapter_number)
-
-                tension_info = f"Expected tension: {tension.value}"
+                # ★ Phase 3: 使用 PlotArc 的 get_expected_tension_100 方法（含非线性插值）
+                tension_100 = plot_arc.get_expected_tension_100(chapter_number)
+                parts.append(f"预设期望张力等级：{tension_100}/100（{tension.display_name}）")
                 if next_point:
-                    tension_info += f"\nNext plot point at chapter {next_point.chapter_number}: {next_point.description}"
-
-                return tension_info
-            return "No plot arc defined"
+                    parts.append(
+                        f"下一个锚点：第{next_point.chapter_number}章 - {next_point.description}"
+                    )
         except Exception as e:
-            logger.warning(f"Failed to get plot tension: {e}")
-            return "Plot tension unavailable"
+            logger.warning(f"Failed to get plot arc tension: {e}")
+
+        # 2. 前章实际张力评分（闭环反馈的核心）
+        prev_actual_tension = None
+        try:
+            from interfaces.api.dependencies import get_chapter_repository
+            from domain.novel.value_objects.novel_id import NovelId as NId
+            chapter_repo = get_chapter_repository()
+            db = chapter_repo.db if hasattr(chapter_repo, 'db') else None
+            if db is not None and chapter_number > 1:
+                row = db.fetch_one(
+                    "SELECT tension_score, plot_tension, emotional_tension, pacing_tension "
+                    "FROM chapters WHERE novel_id = ? AND number = ?",
+                    (novel_id, chapter_number - 1)
+                )
+                if row and row['tension_score'] is not None and row['tension_score'] != -1:
+                    prev_actual_tension = float(row['tension_score'])
+                    parts.append(
+                        f"前章（第{chapter_number - 1}章）实际张力评分：{prev_actual_tension:.0f}/100"
+                        f"（情节={float(row['plot_tension'] or 0):.0f} "
+                        f"情绪={float(row['emotional_tension'] or 0):.0f} "
+                        f"节奏={float(row['pacing_tension'] or 0):.0f}）"
+                    )
+        except Exception as e:
+            logger.debug(f"Failed to get prev chapter tension: {e}")
+
+        # 3. 张力调整指令（基于预设与实际的差距）
+        # ★ Phase 1: 前三章硬编码高张力指令（冷启动保护）
+        if chapter_number <= 3:
+            early_chapter_directives = {
+                1: (
+                    "🔥【首章铁律】本章是读者决定是否继续阅读的关键！"
+                    "综合张力目标：≥65。"
+                    "必须在第一个节拍就制造强烈冲突/悬念/反转——"
+                    "绝对禁止大段背景介绍、设定灌输、平淡日常！"
+                    "主角必须在被压制/轻视后展露底牌，给读者第一次爽感冲击！"
+                ),
+                2: (
+                    "⚡【次章加速】读者已被首章吸引，但不能松劲！"
+                    "综合张力目标：≥55。"
+                    "本章必须有至少一次实力验证/身份暗示/新冲突爆发。"
+                    "继续升温，扩大主角展现出的特殊之处引发的反响。"
+                ),
+                3: (
+                    "⚡【三章定乾坤】前三章决定了读者是否追读！"
+                    "综合张力目标：≥60。"
+                    "本章必须有一次真正的高潮场景——"
+                    "第一次正式对抗/博弈/危机中的大逆转！"
+                    "读者在这里应该获得明确的'这书好看'的正反馈！"
+                ),
+            }
+            early_directive = early_chapter_directives.get(chapter_number, "")
+            if early_directive:
+                parts.append(early_directive)
+        elif prev_actual_tension is not None:
+            if prev_actual_tension <= 30:
+                parts.append(
+                    "⚠ 紧急指令：前章张力严重不足！本章必须制造至少一次核心冲突/反转/悬念，"
+                    "将综合张力拉升到 55 以上。建议：引入新威胁、暴露隐藏信息、"
+                    "让角色做出痛苦选择。"
+                )
+            elif prev_actual_tension <= 45:
+                parts.append(
+                    "⚡ 调整指令：前章张力偏低，读者可能正在流失。"
+                    "本章应逐步升温——增加信息不对称、加深角色矛盾、"
+                    "让阻碍变得更加紧迫。目标张力：50-65。"
+                )
+            elif prev_actual_tension >= 80:
+                parts.append(
+                    "📊 缓冲指令：前章已是高潮，本章应给读者喘息空间。"
+                    "可以写角色消化冲击、盟友互动、新线索浮现，"
+                    "但结尾要留一个钩子暗示更大的风暴即将到来。目标张力：40-55。"
+                )
+            elif prev_actual_tension >= 65:
+                parts.append(
+                    "📊 维持指令：前章张力较高，本章可以保持高压推进，"
+                    "也可以适当喘息后再次攀升。避免连续高压导致读者疲劳。"
+                )
+
+        if not parts:
+            return "No plot arc defined"
+
+        return "\n".join(parts)
 
     def build_chapter_prompt(
         self,
@@ -774,6 +1087,8 @@ class AutoNovelGenerationWorkflow:
         beat_target_words: Optional[int] = None,
         voice_anchors: str = "",
         chapter_draft_so_far: str = "",
+        regeneration_guidance: Optional[str] = None,
+        chapter_target_words: Optional[int] = None,
     ) -> Prompt:
         """构建 LLM 提示词
 
@@ -785,9 +1100,10 @@ class AutoNovelGenerationWorkflow:
             style_summary: 风格指纹摘要（Phase 2.5）
             beat_prompt: 非空时进入「分节拍」模式（托管断点续写）
             beat_index / total_beats: 节拍序号（0-based / 总数）
-            beat_target_words: 本段目标字数（分节拍时覆盖「整章 2000-3000 字」说明）
+            beat_target_words: 本段目标字数（分节拍时覆盖整章说明）
             voice_anchors: Bible 角色声线/小动作锚点（高优先级 System 提示）
-            chapter_draft_so_far: 同章内当前节拍之前已生成的正文（拼接后传入，避免后续节拍重复）
+            chapter_draft_so_far: 同章内当前节拍之前已生成的正文
+            chapter_target_words: 非 beat 模式下的整章目标字数（覆盖默认硬编码值）
 
         Returns:
             Prompt 对象
@@ -796,19 +1112,25 @@ class AutoNovelGenerationWorkflow:
         pt = (plot_tension or "").strip()
         ss = (style_summary or "").strip()
         va = (voice_anchors or "").strip()
+        beat_mode = bool((beat_prompt or "").strip())
         planning_parts: list[str] = []
         if sc and sc not in ("Storyline context unavailable",):
             planning_parts.append(f"【故事线 / 里程碑】\n{sc}")
-        if pt and pt not in ("Plot tension unavailable",):
-            planning_parts.append(f"【情节节奏 / 期望张力】\n{pt}")
+        if pt and pt not in ("Plot tension unavailable", "No plot arc defined"):
+            planning_parts.append(f"【情节节奏 / 张力控制（必须遵守）】\n{pt}")
         if ss:
             planning_parts.append(f"【风格约束】\n{ss}")
         planning_section = ""
         if planning_parts:
-            planning_section = (
-                "\n".join(planning_parts)
-                + "\n\n以上约束须与本章大纲及后文 Bible/摘要一致；不得与之矛盾。\n"
-            )
+            if beat_mode:
+                # 分节拍写作：故事线/张力已在 beat_prompt 中兑现，system 侧只保留文风约束，避免设定抢戏
+                style_only = [p for p in planning_parts if p.startswith("【风格约束】")]
+                planning_parts = style_only
+            if planning_parts:
+                planning_section = (
+                    "\n".join(planning_parts)
+                    + "\n\n以上约束须与本章大纲及后文 Bible/摘要一致；不得与之矛盾。\n"
+                )
 
         voice_block = ""
         if va:
@@ -817,13 +1139,24 @@ class AutoNovelGenerationWorkflow:
                 f"{va}\n\n"
             )
 
-        beat_mode = bool((beat_prompt or "").strip())
         prior_in_chapter = format_prior_draft_for_prompt(chapter_draft_so_far)
-        length_rule = (
-            f"7. 本段约 {beat_target_words} 字（本章分多节输出之一，勿写章节标题）"
-            if beat_target_words
-            else ("7. 章节长度：3000-4000字" if not beat_mode else "7. 按下方节拍说明控制篇幅，勿写章节标题")
-        )
+        # 字数控制：像小说家一样自然收束，而非粗暴截断
+        if beat_target_words:
+            length_rule = (
+                f"7. 【字数指引】本节拍约 {beat_target_words} 字。"
+                f"用有信息的对话、动作与因果推进填到目标附近，禁止为凑字重复描写同一致震撼或同一情绪；"
+                f"收束用完整句，不要戛然而止。"
+            )
+        elif beat_mode:
+            length_rule = "7. 按下方节拍说明控制篇幅，勿写章节标题"
+        elif chapter_target_words:
+            length_rule = (
+                f"7. 【章节字数指引】本章目标约 {chapter_target_words} 字。"
+                f"完整覆盖下方大纲的所有要点，字数不足时优先补充对话与场景细节，禁止重复情节水字；"
+                f"用完整句收束，不要戛然而止。"
+            )
+        else:
+            length_rule = "7. 章节长度：3000-4000字"
         beat_extra = ""
         if beat_mode and beat_index is not None and total_beats is not None and total_beats > 0:
             if prior_in_chapter:
@@ -856,41 +1189,103 @@ class AutoNovelGenerationWorkflow:
             except Exception as e:
                 logger.warning(f"MemoryEngine fact_lock 构建失败: {e}")
 
+        # ★ Theme 集成：获取系统人设和写作规则
+        theme_persona = ""
+        theme_rules = ""
+        format_rules = ""
+        battle_enhancement = ""
+
+        if self._theme_integrator:
+            try:
+                theme_persona = self._theme_integrator.build_system_persona()
+                theme_rules = self._theme_integrator.build_writing_rules()
+                format_rules = self._theme_integrator.build_format_rules()
+
+                # 战斗场景检测和增强
+                if beat_mode and beat_prompt:
+                    battle_enhancement = self._theme_integrator.build_beat_enhancement(
+                        beat_prompt, beat_focus="", chapter_number=self._current_chapter_number or 0, outline=outline
+                    )
+            except Exception as e:
+                logger.debug(f"Theme 增强构建失败: {e}")
+
+        # ★★★ 爽文引擎: 动态 Prompt 模板方案 ★★★
+        # 架构决策：不在 autopilot_daemon 中硬编码规则引擎，
+        # 而是在 workflow 的 Prompt 构建层注入动态爽文约束。
+        # 这样 LLM 在强约束下自行发挥爽点呈现形式，比硬编码更灵活。
+        shuangwen_directive = self._build_shuangwen_directive(
+            chapter_number=self._current_chapter_number or 0,
+            beat_mode=beat_mode,
+            beat_index=beat_index,
+            total_beats=total_beats,
+            beat_prompt=beat_prompt or "",
+            outline=outline,
+        )
+
+        prose_discipline = build_prose_discipline_block(
+            beat_mode=beat_mode,
+            beat_target_words=beat_target_words,
+        )
+
         # ⚡ 提示词集中管理说明：
-        # 此模板对应 prompts_defaults.json 中的 id=workflow-chapter-generation
-        # 如需修改提示词内容，请编辑 JSON 文件而非此代码文件
-        system_message = f"""你是一位专业的网络小说作家。根据以下上下文撰写章节内容。
+        # 此模板对应 prompt_packages/nodes/chapter-generation-main（CPMS chapter-generation-main）
+        # CPMS: 优先从 PromptRegistry 获取模板，不可用时使用硬编码回退
+        system_template = self._get_workflow_system_template()
+        user_template = self._get_workflow_user_template()
 
-{planning_section}{voice_block}{context}
+        # 使用模板渲染（兼容 CPMS 模板和硬编码回退）
+        # SafeDict: 用户在提示词广场编辑模板时可能引入未知变量，
+        # 需要安全降级——未匹配的变量保留为 {name} 占位符，而非抛出 KeyError
+        system_vars = {
+            "theme_persona": theme_persona,
+            "theme_rules": theme_rules,
+            "planning_section": planning_section,
+            "voice_block": voice_block,
+            "context": context,
+            "fact_lock": fact_lock,
+            "shuangwen_directive": shuangwen_directive,
+            "prose_discipline": prose_discipline,
+            "length_rule": length_rule,
+            "beat_extra": beat_extra,
+            "format_rules": format_rules,
+        }
+        system_message = _safe_format(system_template, system_vars)
 
-{fact_lock}
-写作要求：
-1. 必须有多个人物互动（至少2-3个角色出场）
-2. 必须有对话（不能只有独白和叙述）
-3. 必须有冲突或张力（人物之间的矛盾、目标阻碍、悬念等）
-4. 保持人物性格一致
-5. 推进情节发展
-6. 使用生动的场景描写和细节
-{length_rule}
-8. 用中文写作，使用第三人称叙事{beat_extra}"""
+        # 旧版 CPMS 模板可能未含 {prose_discipline} 占位符：仍注入反八股块，避免升级后长期不生效
+        if "行文戒律（反八股 / 控水分）" not in system_message:
+            system_message = system_message.rstrip() + "\n\n" + prose_discipline
 
-        user_message = f"""请根据以下大纲撰写本章内容：
+        if "人名硬约束" not in system_message:
+            system_message = system_message.rstrip() + (
+                "\n\n【人名硬约束】上下文人物设定（Bible）中的姓名为唯一正典。"
+                "若本章大纲、故事线摘要或节拍说明中出现不同的人名（含旧稿占位名），"
+                "正文必须以 Bible 为准统一使用 Bible 姓名，不得继续使用大纲里的占位名。\n"
+            )
 
-{outline}
-
-关键要求（必须遵守）：
-- 至少2-3个角色出场并互动
-- 必须包含对话场景（不少于3段对话）
-- 必须有明确的冲突或戏剧张力
-- 场景要具体生动，不要空泛叙述
-- 推进主线情节，不要原地踏步
-- 结尾要有悬念或转折"""
+        user_message = _safe_format(user_template, {"outline": outline, "beat_section": ""})
 
         if beat_mode and prior_in_chapter:
+            # V2：基于锚点的动态连贯性要求
+            try:
+                from application.workflows.beat_continuation import extract_beat_tail_anchor
+                anchor = extract_beat_tail_anchor(prior_in_chapter)
+                coherence_rules = _build_dynamic_coherence_rules(anchor)
+            except Exception:
+                coherence_rules = (
+                    "1. 紧接上文最后的情节发展，保持时间线和逻辑的连续性\n"
+                    "2. 如果上文以对话结尾，本节拍应继续该对话或自然过渡\n"
+                    "3. 如果上文以动作结尾，本节拍应展示该动作的结果\n"
+                    "4. 保持相同的场景设置，除非节拍明确要求转换场景\n"
+                    "5. 人物情绪和状态应与上文保持一致并合理发展"
+                )
+
             user_message += f"""
 
-【本章已生成正文（仅承接；禁止复述、改写或重复已交代的情节与对白；勿写章节标题）】
+【本章上文（近期全文精确衔接 + 远期回溯避免重复；禁止复述、改写或重复已交代的情节与对白；勿写章节标题）】
 {prior_in_chapter}
+
+【🔗 连贯性要求（基于上文尾部状态动态生成）】
+{coherence_rules}
 """
 
         if beat_mode:
@@ -901,16 +1296,244 @@ class AutoNovelGenerationWorkflow:
                 if prior_in_chapter
                 else "本段只写该节拍对应正文，与全章其它节拍情节连贯。"
             )
+
+            # 节拍间过渡指导（V2：基于前节拍尾部锚点的精确衔接指令）
+            transition_guide = ""
+            if prior_in_chapter and bi > 0:
+                try:
+                    from application.workflows.beat_continuation import (
+                        extract_beat_tail_anchor,
+                        build_beat_transition_directive,
+                    )
+                    anchor = extract_beat_tail_anchor(prior_in_chapter)
+                    next_beat_desc = (beat_prompt or "").strip()[:80] if beat_prompt else ""
+                    transition_guide = "\n\n" + build_beat_transition_directive(
+                        anchor, bi, tb, next_beat_desc,
+                    )
+                except Exception as e:
+                    logger.debug(f"节拍衔接锚点提取失败，降级通用过渡: {e}")
+                    transition_guide = f"\n\n【节拍过渡指导（第{bi}/{tb}节拍）】\n- 从上一节拍的结尾自然过渡到本节拍的焦点\n- 保持叙事的流畅性，避免突兀的情节跳跃\n- 如果场景改变，提供合理的过渡说明"
+
+            # ★ 战斗场景增强
+            battle_hint = ""
+            if battle_enhancement:
+                battle_hint = f"\n\n{battle_enhancement}"
+
             user_message += f"""
 
 【节拍 {bi + 1}/{tb}】
 {(beat_prompt or '').strip()}
 
-{beat_tail}"""
+{beat_tail}{transition_guide}{battle_hint}"""
+
+        # 重写指导注入：告知 AI 这是重写任务，并提供改进方向
+        if regeneration_guidance and regeneration_guidance.strip():
+            user_message += (
+                f"\n\n【重新生成指导】\n"
+                f"本章为重新生成（已有旧版本）。请根据以下改进方向撰写全新版本，"
+                f"不必沿袭旧版本的情节走向或措辞：\n{regeneration_guidance.strip()}"
+            )
 
         user_message += "\n\n开始撰写："
 
         return Prompt(system=system_message, user=user_message)
+
+    # ─── CPMS 模板获取辅助方法 ───
+
+    def _get_workflow_system_template(self) -> str:
+        """获取主工作流 system 模板（CPMS 优先 -> 硬编码回退）。
+
+        设计决策：
+        - 主工作流的 system prompt 包含大量动态变量（theme_persona, fact_lock 等），
+          不适合直接用 Registry.render() 一步渲染，而是获取模板后由 _build_prompt 手动 format。
+        - 如果 PromptRegistry 中注册了 workflow-chapter-generation 节点，
+          用户可在提示词广场直接编辑此模板并实时生效。
+        - 降级时使用模块级 _FALLBACK_SYSTEM_TEMPLATE 常量。
+
+        Returns:
+            system prompt 模板字符串（含 {variable} 占位符）
+        """
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            system = registry.get_system(_WORKFLOW_CHAPTER_GEN_NODE_KEY)
+            if system:
+                logger.debug(
+                    "CPMS: 使用 Registry 模板 (node_key=%s)", _WORKFLOW_CHAPTER_GEN_NODE_KEY
+                )
+                return system
+        except Exception as exc:
+            logger.debug(
+                "PromptRegistry 不可用 (node_key=%s): %s", _WORKFLOW_CHAPTER_GEN_NODE_KEY, exc
+            )
+
+        logger.debug("CPMS: 使用硬编码回退 system 模板")
+        return _FALLBACK_SYSTEM_TEMPLATE
+
+    def _get_workflow_user_template(self) -> str:
+        """获取主工作流 user 模板（CPMS 优先 -> 硬编码回退）。
+
+        同 _get_workflow_system_template 的设计决策：
+        - 获取模板文本，后续由 _build_prompt 根据节拍模式追加更多段落。
+        - 降级时使用模块级 _FALLBACK_USER_TEMPLATE 常量。
+
+        Returns:
+            user prompt 模板字符串（含 {variable} 占位符）
+        """
+        try:
+            from infrastructure.ai.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            user_template = registry.get_user_template(_WORKFLOW_CHAPTER_GEN_NODE_KEY)
+            if user_template:
+                logger.debug(
+                    "CPMS: 使用 Registry user_template (node_key=%s)", _WORKFLOW_CHAPTER_GEN_NODE_KEY
+                )
+                return user_template
+        except Exception as exc:
+            logger.debug(
+                "PromptRegistry 不可用 (node_key=%s): %s", _WORKFLOW_CHAPTER_GEN_NODE_KEY, exc
+            )
+
+        logger.debug("CPMS: 使用硬编码回退 user_template")
+        return _FALLBACK_USER_TEMPLATE
+
+    # ─── 两阶段生成：剧本 → 正文（PromptGateway 驱动） ───
+
+    async def _generate_script(
+        self,
+        context: str,
+        outline: str,
+        target_words: int,
+        storyline_context: str = "",
+        plot_tension: str = "",
+        style_summary: str = "",
+    ) -> str:
+        """阶段 A: 生成六模块导演剧本。"""
+        prompt = get_prompt_gateway().render(
+            SCRIPT_GENERATION_CONTRACT,
+            {
+                "outline": outline,
+                "context": context,
+                "storyline_context": storyline_context,
+                "plot_tension": plot_tension,
+                "style_summary": style_summary,
+                "target_words": str(target_words),
+            },
+        ).prompt
+        config = GenerationConfig()
+        logger.info("  → 生成六模块剧本 (node_key=%s)", _SCRIPT_GEN_NODE_KEY)
+        result = await self.llm_service.generate(prompt, config)
+        script = strip_reasoning_artifacts((result.content or "").strip())
+        logger.info("  ✓ 剧本生成完成: %d 字符", len(script))
+        return script
+
+    async def _generate_prose_from_script(
+        self,
+        script: str,
+        outline: str,
+        target_words: int,
+        context: str = "",
+    ) -> str:
+        """阶段 B: 根据剧本生成正文。"""
+        prompt = get_prompt_gateway().render(
+            PROSE_FROM_SCRIPT_CONTRACT,
+            {
+                "script": script,
+                "outline": outline,
+                "context": context,
+                "target_words": str(target_words),
+            },
+        ).prompt
+        config = GenerationConfig()
+        logger.info("  → 根据剧本生成正文 (node_key=%s)", _PROSE_FROM_SCRIPT_NODE_KEY)
+        result = await self.llm_service.generate(prompt, config)
+        prose = (result.content or "").strip()
+        logger.info("  ✓ 正文生成完成: %d 字符", len(prose))
+        return prose
+
+    async def _generate_script_stream(
+        self,
+        context: str,
+        outline: str,
+        target_words: int,
+        storyline_context: str = "",
+        plot_tension: str = "",
+        style_summary: str = "",
+        llm_service: Optional[LLMService] = None,
+        custom_template: Optional[str] = None,
+        custom_variables: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """流式版本：生成六模块剧本，逐 token 产出。"""
+        service = llm_service or self.llm_service
+        if custom_template:
+            vars_map = {
+                "outline": outline,
+                "context": context,
+                "storyline_context": storyline_context,
+                "plot_tension": plot_tension,
+                "style_summary": style_summary,
+                "target_words": str(target_words),
+            }
+            if custom_variables:
+                vars_map.update(custom_variables)
+            rendered = _render_template(custom_template, vars_map)
+            prompt = Prompt(system="", user=rendered)
+            logger.info("  → 流式生成六模块剧本 (自定义模板)")
+        else:
+            prompt = get_prompt_gateway().render(
+                SCRIPT_GENERATION_CONTRACT,
+                {
+                    "outline": outline,
+                    "context": context,
+                    "storyline_context": storyline_context,
+                    "plot_tension": plot_tension,
+                    "style_summary": style_summary,
+                    "target_words": str(target_words),
+                },
+            ).prompt
+            logger.info("  → 流式生成六模块剧本 (node_key=%s)", _SCRIPT_GEN_NODE_KEY)
+        config = GenerationConfig()
+        async for piece in service.stream_generate(prompt, config):
+            yield piece
+
+    async def _generate_prose_from_script_stream(
+        self,
+        script: str,
+        outline: str,
+        target_words: int,
+        context: str = "",
+        llm_service: Optional[LLMService] = None,
+        custom_template: Optional[str] = None,
+        custom_variables: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """流式版本：根据剧本生成正文，逐 token 产出。"""
+        service = llm_service or self.llm_service
+        if custom_template:
+            vars_map = {
+                "script": script,
+                "outline": outline,
+                "context": context,
+                "target_words": str(target_words),
+            }
+            if custom_variables:
+                vars_map.update(custom_variables)
+            rendered = _render_template(custom_template, vars_map)
+            prompt = Prompt(system="", user=rendered)
+            logger.info("  → 流式生成正文 (自定义模板)")
+        else:
+            prompt = get_prompt_gateway().render(
+                PROSE_FROM_SCRIPT_CONTRACT,
+                {
+                    "script": script,
+                    "outline": outline,
+                    "context": context,
+                    "target_words": str(target_words),
+                },
+            ).prompt
+            logger.info("  → 流式生成正文 (node_key=%s)", _PROSE_FROM_SCRIPT_NODE_KEY)
+        config = GenerationConfig()
+        async for piece in service.stream_generate(prompt, config):
+            yield piece
 
     async def _extract_chapter_state(self, content: str, chapter_number: int) -> ChapterState:
         """从生成的内容中提取章节状态
@@ -938,6 +1561,208 @@ class AutoNovelGenerationWorkflow:
             foreshadowing_planted=[],
             foreshadowing_resolved=[],
             events=[]
+        )
+
+    # ──────────────────────────────────────────────────────────
+    # ★★★ 爽文引擎: 动态 Prompt 模板方案 ★★★
+    # ──────────────────────────────────────────────────────────
+
+    # 题材内爽点关键词检测表：只强化节奏，不替换作者原设和赛道。
+    _SHUANGWEN_BEAT_PATTERNS = {
+        "power_reveal": {
+            "keywords": ["实力", "底牌", "爆发", "力量", "实力展现", "压倒性", "碾压", "秒杀",
+                         "一招", "击败", "战胜", "震惊全场", "不可置信"],
+            "directive": (
+                "【题材内爽文·实力爆发】本节拍包含实力/能力验证爽点，必须用本书既有力量体系来写。\n"
+                "必须遵守：\n"
+                "① 蓄力充分：前文的轻视、压制、资源差或规则不公要让读者憋住一口气\n"
+                "② 爆发清楚：动作、招式、判断或操作必须可视化，不能只报数值和结论\n"
+                "③ 反应有效：旁观者/对手反应服务爽点，每人一两个具体动作或台词即可\n"
+                "④ 主角态度服从人设：可以冷静、狂、狠、克制，但不能为了装而违背角色\n"
+                "⑤ 禁止借未设定的科技、系统、血脉、废土、赛博等外壳制造爆发；爽点必须来自作者原设。"
+            ),
+        },
+        "identity_reveal": {
+            "keywords": ["身份", "真实身份", "揭露", "曝光", "隐藏身份", "背景", "来历",
+                         "竟然是", "原来", "家世", "师承", "传承"],
+            "directive": (
+                "【题材内爽文·身份反转】本节拍包含身份/地位/来历揭露，必须回收已有铺垫。\n"
+                "必须遵守：\n"
+                "① 铺垫清晰：之前的误解/低估/忽视必须完整呈现\n"
+                "② 揭露戏剧性：一个动作、一句话、一枚信物——让真相轰然揭晓\n"
+                "③ 震动全场：周围人态度变化要具体，但不要机械要求所有人同一种震惊\n"
+                "④ 对手反应：之前的打压者必须为误判付出代价，代价形态服从情节\n"
+                "⑤ 主角态度服从人设，不强行云淡风轻\n"
+                "⑥ 认知冲击要充分，但禁止车轱辘改述同一句「震撼」；用具体反应与一句锚点动作收束即可。"
+            ),
+        },
+        "face_slap": {
+            "keywords": ["打脸", "啪啪", "反转", "逆转", "实力证明", "出乎意料",
+                         "不敢相信", "目瞪口呆", "瞠目结舌", "自食其果"],
+            "directive": (
+                "【题材内爽文·打脸反转】本节拍包含误判纠正/压制反击爽点。\n"
+                "必须遵守：\n"
+                "① 先压后放：对手的误判、规则压制或资源优势要先成立\n"
+                "② 打脸要落地：让结果在场面、关系、资源或声望上产生可见变化\n"
+                "③ 链式反应：反应递进即可，不要复制粘贴式围观震惊\n"
+                "④ 对手反应要有层次，但不强制崩溃；聪明反派可以立刻补救\n"
+                "⑤ 主角反应服从人设，爽感来自结果和节奏，不来自统一姿态"
+            ),
+        },
+    }
+
+    # 前三章专属的题材内爽文指令
+    _EARLY_CHAPTER_SHUANGWEN = {
+        1: (
+            "【首章爽文原则】这是读者决定去留的关键。\n"
+            "① 第一段必须是动作或对话，绝不能是背景介绍\n"
+            "② 主角尽早遭遇题材内成立的不公、质疑、压制、诱惑或危险\n"
+            "③ 章节过半前要给出一个明确正反馈或反击预期；是否亮底牌服从大纲和人设\n"
+            "④ 结尾必须留下强烈的悬念钩子\n"
+            "⑤ 全章张力要高，但不得为了刺激改写题材外壳"
+        ),
+        2: (
+            "【次章加速原则】首章的爽感必须延续。\n"
+            "① 承接首章悬念，不能重新铺垫\n"
+            "② 主角必须主动推进一次局面，让压制者、旁观者或读者看到变化\n"
+            "③ 引入更清晰的威胁、规则或阶段目标，让爽点升级\n"
+            "④ 结尾暗示更大的回报或更硬的代价\n"
+            "⑤ 张力不低于55/100，但爽点形态服从题材"
+        ),
+        3: (
+            "【三章定调】这是决定追读率的关键章。\n"
+            "① 必须有一次真正的高潮：反击、突破、揭示、胜负或关系转折\n"
+            "② 压制者必须付出代价，代价要被读者看见\n"
+            "③ 主角的特殊之处必须让关键人物重新评估\n"
+            "④ 结尾留下更大的悬念——更强大的对手、更深的秘密\n"
+            "⑤ 读者看完必须产生'这书真爽'的明确正反馈，但不能偏离原设"
+        ),
+    }
+
+    def _build_shuangwen_directive(
+        self,
+        chapter_number: int,
+        beat_mode: bool,
+        beat_index: Optional[int],
+        total_beats: Optional[int],
+        beat_prompt: str,
+        outline: str,
+    ) -> str:
+        """★★★ 题材内爽文引擎: 动态构建爽文约束指令
+
+        架构决策核心实现：
+        - 不在 autopilot_daemon 中硬编码规则引擎
+        - 而是在 workflow 的 Prompt 构建层注入动态爽文约束
+        - LLM 在强约束下自行发挥爽点呈现形式
+        - 约束来自：章节位置、节拍类型、大纲关键词匹配
+
+        Args:
+            chapter_number: 当前章节号
+            beat_mode: 是否为节拍模式
+            beat_index: 节拍索引
+            total_beats: 总节拍数
+            beat_prompt: 节拍 Prompt
+            outline: 章节大纲
+
+        Returns:
+            爽文约束指令文本（注入 system_message）
+        """
+        parts: list[str] = []
+
+        # ── 1. 前三章强力指令（冷启动保护）──
+        if 1 <= chapter_number <= 3:
+            early_directive = self._EARLY_CHAPTER_SHUANGWEN.get(chapter_number, "")
+            if early_directive:
+                parts.append(early_directive)
+
+        # ── 2. 节拍级爽点检测与指令注入 ──
+        if beat_mode and beat_prompt:
+            beat_directive = self._detect_and_build_beat_directive(
+                beat_prompt, outline
+            )
+            if beat_directive:
+                parts.append(beat_directive)
+
+        # ── 3. 节拍位置约束（基于 STEP 阶跃） ──
+        if beat_mode and beat_index is not None and total_beats and total_beats > 0:
+            position_hint = self._build_beat_position_hint(
+                beat_index, total_beats, chapter_number
+            )
+            if position_hint:
+                parts.append(position_hint)
+
+        # ── 4. 通用爽文节奏约束（所有章节） ──
+        parts.append(self._build_general_shuangwen_rules())
+
+        if parts:
+            return "\n\n━━━ ★ 题材内爽文约束（源设定优先）━━━\n\n" + "\n\n".join(parts)
+
+        return ""
+
+    def _detect_and_build_beat_directive(self, beat_prompt: str, outline: str) -> str:
+        """检测节拍/大纲中的爽点关键词，返回对应的约束指令"""
+        combined_text = f"{beat_prompt} {outline}"
+
+        best_match = None
+        best_score = 0
+
+        for pattern_name, pattern_config in self._SHUANGWEN_BEAT_PATTERNS.items():
+            score = sum(1 for kw in pattern_config["keywords"] if kw in combined_text)
+            if score > best_score:
+                best_score = score
+                best_match = pattern_config
+
+        if best_match and best_score >= 1:
+            return best_match["directive"]
+
+        return ""
+
+    def _build_beat_position_hint(
+        self, beat_index: int, total_beats: int, chapter_number: int
+    ) -> str:
+        """根据节拍在章节中的位置，返回节奏约束"""
+        progress = beat_index / max(total_beats, 1)
+
+        if progress < 0.2:
+            return (
+                "📍【节奏: 章节开篇】前20%篇幅——\n"
+                "- 用画面/动作/对话抓住读者，禁止大段叙述\n"
+                "- 埋下本章冲突的种子\n"
+                "- 如果有前章悬念，必须在前三句内接住"
+            )
+        elif progress < 0.5:
+            return (
+                "📍【节奏: 升温蓄力】20%-50%篇幅——\n"
+                "- 冲突逐步升级，每段都有信息增量\n"
+                "- 读者应该感到'有什么大事要发生了'\n"
+                "- 主角遭遇的压制要越来越让人憋屈"
+            )
+        elif progress < 0.8:
+            return (
+                "【节奏: 爽点爆发】50%-80%篇幅——核心爽区。\n"
+                "- 这是本章最关键的部分——爽点必须在这里爆发\n"
+                "- 节奏加快，短句为主，画面快速切换\n"
+                "- 旁观者反应与对手崩溃要有，但每人一两笔具体动作/台词即可，禁止排比灌水"
+            )
+        else:
+            return (
+                "📍【节奏: 收尾钩子】最后20%篇幅——\n"
+                "- 爽感余韵：让读者在满足中回味\n"
+                "- 简洁收尾，不要拖沓\n"
+                "- 必须留一个钩子：一个未解的悬念/一个更大的挑战/一句意味深长的话"
+            )
+
+    def _build_general_shuangwen_rules(self) -> str:
+        """通用题材内爽文节奏约束（适用于所有章节）"""
+        return (
+            "【爽文核心法则】\n"
+            "0. 源设定优先：爽点必须来自作者原始梗概、题材赛道、世界观基调、角色关系和既有能力体系\n"
+            "① 蓄力→爆发→余韵——每章必须有这个节奏循环\n"
+            "② 读者的爽感 = 压抑程度 × 释放力度——没有足够的压抑就没有爽感\n"
+            "③ 旁观者反应要有，但每人一两笔具体动作/台词即可，禁止复制粘贴式排比段\n"
+            "④ 打脸要响、反转要快、悬念要紧；具体呈现服从题材，不硬塞系统/赛博/废土等外壳\n"
+            "⑤ 主角姿态服从人设，可以冷、狂、狠、忍、苟，但不能为了固定爽文姿态而OOC\n"
+            "⑥ 每章至少一次让读者产生'好爽'的瞬间——靠信息与节奏，不靠同义反复堆字数"
         )
 
     def _check_consistency(

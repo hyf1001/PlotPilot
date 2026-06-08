@@ -1,5 +1,5 @@
 """Bible 应用服务"""
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Protocol
 
 from domain.bible.entities.bible import Bible
 from domain.bible.entities.character import Character
@@ -13,11 +13,26 @@ from domain.novel.value_objects.novel_id import NovelId
 from domain.bible.repositories.bible_repository import BibleRepository
 from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
-from domain.shared.exceptions import EntityNotFoundError
+from domain.shared.exceptions import EntityNotFoundError, InvalidOperationError
 from application.world.dtos.bible_dto import BibleDTO, CharacterDTO
 
 if TYPE_CHECKING:
     from application.world.services.bible_location_triple_sync import BibleLocationTripleSyncService
+
+
+class CharacterAnchorUpdateRepository(Protocol):
+    """支持角色锚点行级更新的仓储能力。"""
+
+    def update_character_anchors(
+        self,
+        novel_id: str,
+        character_id: str,
+        *,
+        mental_state: str,
+        verbal_tic: str,
+        idle_behavior: str,
+    ) -> None:
+        """更新角色声线锚点。"""
 
 
 class BibleService:
@@ -29,17 +44,20 @@ class BibleService:
         novel_repository: Optional[NovelRepository] = None,
         chapter_repository: Optional[ChapterRepository] = None,
         location_triple_sync: Optional["BibleLocationTripleSyncService"] = None,
+        unified_character_repository=None,
     ):
         """初始化服务
 
         Args:
             bible_repository: Bible 仓储
             location_triple_sync: 可选；保存 Bible 后将 locations 同步到 triples
+            unified_character_repository: 可选；保存 Bible 后同步写入 unified_characters 表
         """
         self.bible_repository = bible_repository
         self._novel_repository = novel_repository
         self._chapter_repository = chapter_repository
         self._location_triple_sync = location_triple_sync
+        self._unified_char_repo = unified_character_repository
 
     def _validate_locations_forest(self, locations: list) -> None:
         from domain.bible.bible_location_tree import validate_location_forest
@@ -103,7 +121,26 @@ class BibleService:
         character_id: str,
         name: str,
         description: str,
-        relationships: list = None
+        relationships: list = None,
+        *,
+        gender: str = "",
+        age: str = "",
+        appearance: str = "",
+        personality: str = "",
+        background: str = "",
+        core_motivation: str = "",
+        inner_lack: str = "",
+        public_profile: str = "",
+        hidden_profile: str = "",
+        reveal_chapter: int = None,
+        mental_state: str = "NORMAL",
+        mental_state_reason: str = "",
+        verbal_tic: str = "",
+        idle_behavior: str = "",
+        core_belief: str = "",
+        moral_taboos: list = None,
+        voice_profile: dict = None,
+        active_wounds: list = None,
     ) -> BibleDTO:
         """添加人物
 
@@ -129,10 +166,115 @@ class BibleService:
             name=name,
             description=description,
             relationships=relationships or [],
+            gender=gender or "",
+            age=age or "",
+            appearance=appearance or "",
+            personality=personality or "",
+            background=background or "",
+            core_motivation=core_motivation or "",
+            inner_lack=inner_lack or "",
+            public_profile=public_profile or "",
+            hidden_profile=hidden_profile or "",
+            reveal_chapter=reveal_chapter,
+            mental_state=mental_state or "NORMAL",
+            mental_state_reason=mental_state_reason or "",
+            verbal_tic=verbal_tic or "",
+            idle_behavior=idle_behavior or "",
+            core_belief=core_belief or "",
+            moral_taboos=list(moral_taboos or []),
+            voice_profile=dict(voice_profile or {}),
+            active_wounds=list(active_wounds or []),
         )
         bible.add_character(character)
         self.bible_repository.save(bible)
+        self._sync_to_unified_characters(novel_id, bible)
 
+        return BibleDTO.from_domain(bible)
+
+    def upsert_character(
+        self,
+        novel_id: str,
+        character_id: str,
+        name: str,
+        description: str,
+        relationships: list = None,
+        *,
+        gender: str = "",
+        age: str = "",
+        appearance: str = "",
+        personality: str = "",
+        background: str = "",
+        core_motivation: str = "",
+        inner_lack: str = "",
+        public_profile: str = "",
+        hidden_profile: str = "",
+        reveal_chapter: int = None,
+        mental_state: str = "NORMAL",
+        mental_state_reason: str = "",
+        verbal_tic: str = "",
+        idle_behavior: str = "",
+        core_belief: str = "",
+        moral_taboos: list = None,
+        voice_profile: dict = None,
+        active_wounds: list = None,
+    ) -> BibleDTO:
+        """添加或更新人物，供可重放的 AI Invocation 提交使用。"""
+        bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
+        if bible is None:
+            raise EntityNotFoundError("Bible", f"for novel {novel_id}")
+
+        character = bible.get_character(CharacterId(character_id))
+        if character is None:
+            return self.add_character(
+                novel_id=novel_id,
+                character_id=character_id,
+                name=name,
+                description=description,
+                relationships=relationships,
+                gender=gender,
+                age=age,
+                appearance=appearance,
+                personality=personality,
+                background=background,
+                core_motivation=core_motivation,
+                inner_lack=inner_lack,
+                public_profile=public_profile,
+                hidden_profile=hidden_profile,
+                reveal_chapter=reveal_chapter,
+                mental_state=mental_state,
+                mental_state_reason=mental_state_reason,
+                verbal_tic=verbal_tic,
+                idle_behavior=idle_behavior,
+                core_belief=core_belief,
+                moral_taboos=moral_taboos,
+                voice_profile=voice_profile,
+                active_wounds=active_wounds,
+            )
+
+        character.name = name
+        character.description = description
+        character.relationships = list(relationships or [])
+        character.gender = gender or ""
+        character.age = age or ""
+        character.appearance = appearance or ""
+        character.personality = personality or ""
+        character.background = background or ""
+        character.core_motivation = core_motivation or ""
+        character.inner_lack = inner_lack or ""
+        character.public_profile = public_profile or ""
+        character.hidden_profile = hidden_profile or ""
+        character.reveal_chapter = reveal_chapter
+        character.mental_state = mental_state or "NORMAL"
+        character.mental_state_reason = mental_state_reason or ""
+        character.verbal_tic = verbal_tic or ""
+        character.idle_behavior = idle_behavior or ""
+        character.core_belief = core_belief or ""
+        character.moral_taboos = list(moral_taboos or [])
+        character.voice_profile = dict(voice_profile or {})
+        character.active_wounds = list(active_wounds or [])
+
+        self.bible_repository.save(bible)
+        self._sync_to_unified_characters(novel_id, bible)
         return BibleDTO.from_domain(bible)
 
     def update_character_voice_anchors(
@@ -144,24 +286,50 @@ class BibleService:
         verbal_tic: str,
         idle_behavior: str,
     ) -> CharacterDTO:
-        """更新角色声线锚点（SQLite 行级更新）。"""
+        """更新角色声线锚点。
+
+        优先使用仓储提供的行级更新能力；通用仓储没有该能力时，回退到
+        ``get_by_novel_id -> 修改聚合 -> save`` 的读改写路径。两条路径都显式校验
+        Bible 与 Character 存在，避免把运行时能力差异以未实现异常暴露给
+        API 层。
+        """
         repo = self.bible_repository
-        if not hasattr(repo, "update_character_anchors"):
-            raise NotImplementedError("仓储不支持角色锚点更新")
-        repo.update_character_anchors(
-            novel_id,
-            character_id,
-            mental_state=mental_state or "NORMAL",
-            verbal_tic=verbal_tic or "",
-            idle_behavior=idle_behavior or "",
-        )
+        normalized_mental_state = mental_state or "NORMAL"
+        normalized_verbal_tic = verbal_tic or ""
+        normalized_idle_behavior = idle_behavior or ""
+
+        updater = getattr(repo, "update_character_anchors", None)
+        if callable(updater):
+            updater(
+                novel_id,
+                character_id,
+                mental_state=normalized_mental_state,
+                verbal_tic=normalized_verbal_tic,
+                idle_behavior=normalized_idle_behavior,
+            )
+            bible, ch = self._get_bible_and_character(novel_id, character_id)
+            self._sync_to_unified_characters(novel_id, bible)
+            return CharacterDTO.from_domain(ch)
+
+        if not callable(getattr(repo, "get_by_novel_id", None)) or not callable(getattr(repo, "save", None)):
+            raise InvalidOperationError("Bible 仓储缺少角色锚点读改写所需的 get_by_novel_id/save 能力")
+
+        bible, ch = self._get_bible_and_character(novel_id, character_id)
+        ch.mental_state = normalized_mental_state
+        ch.verbal_tic = normalized_verbal_tic
+        ch.idle_behavior = normalized_idle_behavior
+        repo.save(bible)
+        self._sync_to_unified_characters(novel_id, bible)
+        return CharacterDTO.from_domain(ch)
+
+    def _get_bible_and_character(self, novel_id: str, character_id: str) -> tuple[Bible, Character]:
         bible = self.bible_repository.get_by_novel_id(NovelId(novel_id))
         if bible is None:
             raise EntityNotFoundError("Bible", f"for novel {novel_id}")
         ch = bible.get_character(CharacterId(character_id))
         if ch is None:
             raise EntityNotFoundError("Character", character_id)
-        return CharacterDTO.from_domain(ch)
+        return bible, ch
 
     def build_character_voice_anchor_section(self, novel_id: str) -> str:
         """供章节/节拍 System 提示：非空锚点拼成一段。"""
@@ -360,6 +528,22 @@ class BibleService:
             return None
         return BibleDTO.from_domain(bible)
 
+    def ensure_bible_for_novel(self, novel_id: str) -> BibleDTO:
+        """若小说已在库但未建 Bible 行，则创建空 Bible 并返回。
+
+        新书创建后轮询工作台时常见「先读到小说再读 Bible」，避免无端 404。
+        若 novel_id 指向的小说不存在：抛出 EntityNotFoundError(Novel)。
+        """
+        dto = self.get_bible_by_novel(novel_id)
+        if dto is not None:
+            return dto
+        if self._novel_repository is None:
+            raise EntityNotFoundError("Bible", f"for novel {novel_id}")
+        novel = self._novel_repository.get_by_id(NovelId(novel_id))
+        if novel is None:
+            raise EntityNotFoundError("Novel", novel_id)
+        return self.create_bible(f"{novel_id}-bible", novel_id)
+
     def update_bible(
         self,
         novel_id: str,
@@ -391,6 +575,10 @@ class BibleService:
 
         self._validate_locations_forest(locations)
 
+        # 记录改名前的 id→name 映射，用于 save 后同步刷新 story_nodes
+        prev_name_by_id = {c.character_id.value: c.name for c in bible.characters}
+        prev_chars = {c.character_id.value: c for c in bible.characters}
+
         # 清空现有数据
         bible._characters = []
         bible._world_settings = []
@@ -398,11 +586,51 @@ class BibleService:
         bible._timeline_notes = []
         bible._style_notes = []
 
-        prev_chars = {c.character_id.value: c for c in bible.characters}
-
         # 添加新的人物（锚点字段：请求未传则沿用库内旧值，避免整本保存冲掉沙盒写入）
         for char_data in characters:
             prev = prev_chars.get(char_data.id)
+            if getattr(char_data, "gender", None) is not None:
+                gender = char_data.gender or ""
+            elif prev is not None:
+                gender = getattr(prev, "gender", None) or ""
+            else:
+                gender = ""
+            if getattr(char_data, "age", None) is not None:
+                age = char_data.age or ""
+            elif prev is not None:
+                age = getattr(prev, "age", None) or ""
+            else:
+                age = ""
+            if getattr(char_data, "appearance", None) is not None:
+                appearance = char_data.appearance or ""
+            elif prev is not None:
+                appearance = getattr(prev, "appearance", None) or ""
+            else:
+                appearance = ""
+            if getattr(char_data, "personality", None) is not None:
+                personality = char_data.personality or ""
+            elif prev is not None:
+                personality = getattr(prev, "personality", None) or ""
+            else:
+                personality = ""
+            if getattr(char_data, "background", None) is not None:
+                background = char_data.background or ""
+            elif prev is not None:
+                background = getattr(prev, "background", None) or ""
+            else:
+                background = ""
+            if getattr(char_data, "core_motivation", None) is not None:
+                core_motivation = char_data.core_motivation or ""
+            elif prev is not None:
+                core_motivation = getattr(prev, "core_motivation", None) or ""
+            else:
+                core_motivation = ""
+            if getattr(char_data, "inner_lack", None) is not None:
+                inner_lack = char_data.inner_lack or ""
+            elif prev is not None:
+                inner_lack = getattr(prev, "inner_lack", None) or ""
+            else:
+                inner_lack = ""
             if char_data.mental_state is not None:
                 ms = char_data.mental_state or "NORMAL"
             elif prev is not None:
@@ -421,14 +649,77 @@ class BibleService:
                 ib = getattr(prev, "idle_behavior", None) or ""
             else:
                 ib = ""
+            if getattr(char_data, "mental_state_reason", None) is not None:
+                msr = char_data.mental_state_reason or ""
+            elif prev is not None:
+                msr = getattr(prev, "mental_state_reason", None) or ""
+            else:
+                msr = ""
+            if getattr(char_data, "public_profile", None) is not None:
+                pub = char_data.public_profile or ""
+            elif prev is not None:
+                pub = getattr(prev, "public_profile", None) or ""
+            else:
+                pub = ""
+            if getattr(char_data, "hidden_profile", None) is not None:
+                hid = char_data.hidden_profile or ""
+            elif prev is not None:
+                hid = getattr(prev, "hidden_profile", None) or ""
+            else:
+                hid = ""
+            if getattr(char_data, "reveal_chapter", None) is not None:
+                rev = char_data.reveal_chapter
+            elif prev is not None:
+                rev = getattr(prev, "reveal_chapter", None)
+            else:
+                rev = None
+            if getattr(char_data, "core_belief", None) is not None:
+                cb = char_data.core_belief or ""
+            elif prev is not None:
+                cb = getattr(prev, "core_belief", None) or ""
+            else:
+                cb = ""
+            if getattr(char_data, "moral_taboos", None) is not None:
+                mt = list(char_data.moral_taboos or [])
+            elif prev is not None:
+                mt = list(getattr(prev, "moral_taboos", None) or [])
+            else:
+                mt = []
+            if getattr(char_data, "voice_profile", None) is not None:
+                vp = dict(char_data.voice_profile or {})
+            elif prev is not None:
+                vp = dict(getattr(prev, "voice_profile", None) or {})
+            else:
+                vp = {}
+            if getattr(char_data, "active_wounds", None) is not None:
+                aw = list(char_data.active_wounds or [])
+            elif prev is not None:
+                aw = list(getattr(prev, "active_wounds", None) or [])
+            else:
+                aw = []
             character = Character(
                 id=CharacterId(char_data.id),
                 name=char_data.name,
                 description=char_data.description,
                 relationships=char_data.relationships,
+                gender=gender,
+                age=age,
+                appearance=appearance,
+                personality=personality,
+                background=background,
+                core_motivation=core_motivation,
+                inner_lack=inner_lack,
+                public_profile=pub,
+                hidden_profile=hid,
+                reveal_chapter=rev,
                 mental_state=ms,
+                mental_state_reason=msr,
                 verbal_tic=vt,
                 idle_behavior=ib,
+                core_belief=cb,
+                moral_taboos=mt,
+                voice_profile=vp,
+                active_wounds=aw,
             )
             bible._characters.append(character)
 
@@ -476,4 +767,103 @@ class BibleService:
 
         self.bible_repository.save(bible)
         self._sync_location_triples(novel_id, bible)
+        self._sync_to_unified_characters(novel_id, bible)
+
+        # 批量刷新结构节点里的旧人名（改名后大纲仍用旧名会导致生成时出现旧名）
+        self._propagate_character_renames(novel_id, prev_name_by_id, characters)
+
         return BibleDTO.from_domain(bible)
+
+    def _sync_to_unified_characters(self, novel_id: str, bible: Bible) -> None:
+        """将 Bible 角色写入 unified_characters（INSERT OR REPLACE）。
+
+        当 unified_character_repository 未注入时静默跳过，向后兼容。
+        """
+        if self._unified_char_repo is None:
+            return
+        import json
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            from domain.character.entities.character import Character as UnifiedCharacter
+            from domain.character.value_objects.character_id import CharacterId as UCId
+            from domain.shared.time_utils import utcnow_iso
+
+            for char in bible.characters:
+                char_id = char.character_id.value
+                try:
+                    unified = UnifiedCharacter(
+                        id=UCId(char_id),
+                        novel_id=novel_id,
+                        name=char.name,
+                        description=getattr(char, "description", "") or "",
+                        gender=getattr(char, "gender", "") or "",
+                        age=getattr(char, "age", "") or "",
+                        appearance=getattr(char, "appearance", "") or "",
+                        personality=getattr(char, "personality", "") or "",
+                        background=getattr(char, "background", "") or "",
+                        core_motivation=getattr(char, "core_motivation", "") or "",
+                        inner_lack=getattr(char, "inner_lack", "") or "",
+                        public_profile=getattr(char, "public_profile", "") or "",
+                        hidden_profile=getattr(char, "hidden_profile", "") or "",
+                        reveal_chapter=getattr(char, "reveal_chapter", None),
+                        role="",  # Bible entity has no role field; stays empty until StateUpdater fills it
+                        verbal_tic=getattr(char, "verbal_tic", "") or "",
+                        idle_behavior=getattr(char, "idle_behavior", "") or "",
+                        core_belief=getattr(char, "core_belief", "") or "",
+                        moral_taboos=list(getattr(char, "moral_taboos", None) or []),
+                        active_wounds=list(getattr(char, "active_wounds", None) or []),
+                        mental_state=getattr(char, "mental_state", "NORMAL") or "NORMAL",
+                        mental_state_reason=getattr(char, "mental_state_reason", "") or "",
+                    )
+                    self._unified_char_repo.save(unified)
+                except Exception as char_err:
+                    logger.warning(f"sync unified_characters failed for {char.name}: {char_err}")
+        except Exception as e:
+            logger.warning(f"_sync_to_unified_characters failed: {e}")
+
+    def _propagate_character_renames(
+        self,
+        novel_id: str,
+        prev_name_by_id: dict,
+        new_characters: list,
+    ) -> None:
+        """对比改名前后的人名，将变化批量写入 story_nodes 的文本字段。
+
+        设计原则：
+        - 只处理同一 character_id 下的人名变更（不影响 id 不变的角色）。
+        - 通过 StoryNodeRepository.bulk_replace_text_sync 做原地 SQLite replace()，
+          单次 UPDATE 处理整个 novel，微秒级，不占 LLM token。
+        - 失败静默（改名刷新是可选增益，不阻断主流程）。
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+
+        try:
+            from application.paths import get_db_path
+            from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
+
+            renames = []
+            for char_data in new_characters:
+                cid = getattr(char_data, "id", None) or ""
+                new_name = (getattr(char_data, "name", None) or "").strip()
+                old_name = (prev_name_by_id.get(cid) or "").strip()
+                if old_name and new_name and old_name != new_name:
+                    renames.append((old_name, new_name))
+
+            if not renames:
+                return
+
+            repo = StoryNodeRepository(str(get_db_path()))
+            for old_name, new_name in renames:
+                affected = repo.bulk_replace_text_sync(novel_id, old_name, new_name)
+                if affected:
+                    _log.info(
+                        "story_nodes 人名替换：novel=%s %s → %s，影响 %d 行",
+                        novel_id, old_name, new_name, affected,
+                    )
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "story_nodes 人名替换失败（不影响主流程）: %s", exc
+            )

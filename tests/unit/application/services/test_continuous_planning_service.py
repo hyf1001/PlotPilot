@@ -5,6 +5,8 @@ import pytest
 from application.blueprint.services.continuous_planning_service import (
     ContinuousPlanningService,
     _extract_outer_json_value,
+    _incremental_macro_parts_trustworthy,
+    _try_parse_parts_from_llm_buffer,
     get_macro_plan_progress,
 )
 
@@ -15,6 +17,17 @@ def _make_service() -> ContinuousPlanningService:
         chapter_element_repo=Mock(),
         llm_service=Mock(),
     )
+
+
+def test_quick_macro_prompt_for_long_book_uses_leading_volume_detail():
+    svc = _make_service()
+
+    prompt = svc._build_quick_macro_prompt({"premise": "主角在高武世界成长。"}, 500)
+
+    assert "只为开篇前导卷规划幕节点" in prompt.system
+    assert "后续卷的幕节点留给写作过程中动态生成" in prompt.system
+    assert "开篇前导卷标题" in prompt.user
+    assert "前 1-2 部" not in prompt.system
 
 
 def test_parse_llm_response_repairs_truncated_macro_plan_json():
@@ -108,6 +121,69 @@ def test_extract_outer_json_value_prefers_object_root_over_leading_array():
     result = _extract_outer_json_value(text)
 
     assert result == '{"parts": [], "theme": "x"}'
+
+
+def test_incremental_macro_parts_trustworthy_rejects_single_char_titles():
+    bad = [
+        {
+            "title": "第一部",
+            "volumes": [
+                {"title": "卷一", "acts": [{"title": "X", "description": ""}]},
+            ],
+        }
+    ]
+    assert _incremental_macro_parts_trustworthy(bad) is False
+
+    ok = [
+        {
+            "title": "第一部",
+            "volumes": [
+                {"title": "卷一", "acts": [{"title": "初入山门", "description": ""}]},
+            ],
+        }
+    ]
+    assert _incremental_macro_parts_trustworthy(ok) is True
+
+
+def test_try_parse_parts_from_llm_buffer_accepts_complete_valid_minimal_json():
+    raw = '{"parts": [{"title": "第一部", "volumes": [{"title": "卷一", "acts": [{"title": "序幕", "description": ""}]}]}], "theme": "x"}'
+    parts = _try_parse_parts_from_llm_buffer(raw)
+    assert parts is not None
+    assert parts[0]["title"] == "第一部"
+    assert parts[0]["volumes"][0]["acts"][0]["title"] == "序幕"
+
+
+@pytest.mark.asyncio
+async def test_stream_macro_llm_text_repairs_partial_text_when_stream_breaks():
+    async def broken_stream(_prompt, _config):
+        yield """{
+          "parts": [
+            {
+              "title": "第一部",
+              "volumes": [
+                {
+                  "title": "第一卷",
+                  "acts": [
+                    {
+                      "title": "第一幕：灰鸦街醒来",
+                      "description": "主角重生后先在灰鸦街求生",
+                      "core_conflict": "隐藏异常并取得训练资格"
+                    },
+                    {
+                      "title": "第二幕：廉价训练舱",
+                      "description": "主角争夺第一批训练资源"
+        """
+        raise RuntimeError("peer closed connection")
+
+    svc = _make_service()
+    svc.llm_service.stream_generate = broken_stream
+
+    raw = await svc._stream_macro_llm_text("novel-1", Mock(), Mock())
+    parsed = svc._parse_llm_response(raw)
+
+    acts = parsed["parts"][0]["volumes"][0]["acts"]
+    assert acts[0]["title"] == "第一幕：灰鸦街醒来"
+    assert acts[1]["title"] == "第二幕：廉价训练舱"
 
 
 @pytest.mark.asyncio

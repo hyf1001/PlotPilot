@@ -11,6 +11,18 @@
       <div class="container">
         <!-- Header -->
         <header class="header">
+          <n-button
+            quaternary
+            circle
+            size="medium"
+            class="header-theme-btn"
+            aria-label="应用设置"
+            @click="appSettingsShell.open()"
+          >
+            <template #icon>
+              <n-icon :component="IconThemeSettings" :size="22" />
+            </template>
+          </n-button>
           <div class="header-content">
             <h1 class="title">墨枢 · 长篇叙事工作台</h1>
             <p class="subtitle">
@@ -48,28 +60,21 @@
               :maxlength="PREMISE_MAX_LEN"
             />
 
-            <n-grid :cols="2" :x-gap="16" :y-gap="16" responsive="screen" class="preset-row">
-              <n-gi>
-                <n-form-item label="赛道 / 类型">
-                  <n-select
-                    v-model:value="newBook.genre"
-                    :options="genreOptions"
-                    placeholder="选择赛道（系统会按预设推进）"
-                    :disabled="creating"
-                  />
-                </n-form-item>
-              </n-gi>
-              <n-gi>
-                <n-form-item label="世界观基调">
-                  <n-select
-                    v-model:value="newBook.worldPreset"
-                    :options="worldPresetOptions"
-                    placeholder="选择基调（不可自填 Prompt）"
-                    :disabled="creating"
-                  />
-                </n-form-item>
-              </n-gi>
-            </n-grid>
+            <div class="taxonomy-block">
+              <div class="taxonomy-block-head">
+                <span class="taxonomy-block-title">市场分区</span>
+                <span class="taxonomy-block-sub">大类 → 细分主题 → 自动写入「类型 / 世界观」；均可再改。</span>
+              </div>
+              <MarketTaxonomyPicker
+                v-model:genre="newBook.genre"
+                v-model:worldPreset="newBook.worldPreset"
+                v-model:storyStructure="newBook.storyStructure"
+                v-model:pacingControl="newBook.pacingControl"
+                v-model:writingStyle="newBook.writingStyle"
+                v-model:specialRequirements="newBook.specialRequirements"
+                :disabled="creating"
+              />
+            </div>
 
             <div v-show="!showAdvanced" class="length-tier-block">
               <div class="length-tier-label">目标篇幅（选一个即可，系统按网文常用节奏推导章数）</div>
@@ -108,7 +113,7 @@
                 </n-gi>
                 <n-gi>
                   <n-form-item label="每章字数">
-                    <n-input-number v-model:value="newBook.words" :min="500" :max="10000" :step="500" class="w-full" />
+                    <n-input-number v-model:value="newBook.words" :min="500" :max="20000" :step="500" class="w-full" />
                   </n-form-item>
                 </n-gi>
               </n-grid>
@@ -120,7 +125,7 @@
                 size="large"
                 round
                 :loading="creating"
-                :disabled="!newBook.premise.trim() || !newBook.genre || !newBook.worldPreset"
+                :disabled="!newBook.premise.trim() || !newBook.genre.trim() || !newBook.worldPreset.trim() || !newBook.storyStructure.trim() || !newBook.pacingControl.trim() || !newBook.writingStyle.trim() || !newBook.specialRequirements.trim()"
                 @click="handleCreate"
               >
                 <template #icon>
@@ -320,9 +325,6 @@
       @skip="handleSetupSkip"
     />
 
-    <!-- LLM Settings Modal -->
-    <LLMSettingsModal v-model:show="showLLMSettings" />
-
     <!-- 查看全部书目弹窗 -->
     <n-modal
       v-model:show="showAllModal"
@@ -415,10 +417,22 @@ import { h, ref, onMounted, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage, NIcon } from 'naive-ui'
 import { novelApi, type NovelDTO } from '../api/novel'
+import { isWizardCompleted } from '@/utils/wizardStageCache'
 import StatsSidebar from '@/components/stats/StatsSidebar.vue'
 import NovelSetupGuide from '@/components/onboarding/NovelSetupGuide.vue'
-import LLMSettingsModal from '@/components/LLMSettingsModal.vue'
+import { useAppSettingsShellStore } from '@/stores/appSettingsShellStore'
+import MarketTaxonomyPicker from '@/components/taxonomy/MarketTaxonomyPicker.vue'
+import { parseGenreWorldFromPremise } from '@/utils/premisePresets'
 import { useStatsStore } from '@/stores/statsStore'
+import { storageKeys } from '@/config/storageKeys'
+import { readStorageBoolean } from '@/utils/storage'
+import { formatApiError } from '@/utils/apiError'
+import {
+  NOVEL_LENGTH_TIER_OPTIONS,
+  getNovelStageLabel,
+  getNovelStageTagType,
+  type NovelLengthTier,
+} from '@/domain/novel'
 
 // Icons
 const IconSpark = () =>
@@ -441,6 +455,14 @@ const IconChevronUp = () =>
   h('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: '0 0 24 24', width: '1em', height: '1em' },
     h('path', { fill: 'currentColor', d: 'M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6 1.41 1.41z' }))
 
+/** 与工作台顶栏一致：打开应用设置（默认「外观与主题」分区） */
+const IconThemeSettings = () =>
+  h('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: '0 0 24 24', width: '1em', height: '1em' },
+    h('path', {
+      fill: 'currentColor',
+      d: 'M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z',
+    }))
+
 interface BookListItem {
   slug: string
   title: string
@@ -454,14 +476,14 @@ interface BookListItem {
 const router = useRouter()
 const message = useMessage()
 const statsStore = useStatsStore()
+const appSettingsShell = useAppSettingsShellStore()
 
 const createInputRef = ref<any>(null)
 const showAdvanced = ref(false)
 const creating = ref(false)
 const loading = ref(false)
 
-const SIDEBAR_COLLAPSED_KEY = 'plotpilot_sidebar_collapsed'
-const sidebarCollapsed = ref(localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true')
+const sidebarCollapsed = ref(readStorageBoolean(storageKeys.statsSidebarCollapsed))
 
 function handleSidebarCollapsedChange(isCollapsed: boolean) {
   sidebarCollapsed.value = isCollapsed
@@ -469,7 +491,6 @@ function handleSidebarCollapsedChange(isCollapsed: boolean) {
 const books = ref<BookListItem[]>([])
 const searchQuery = ref('')
 const deletingSlug = ref<string | null>(null)
-const showLLMSettings = ref(false)
 const showAllModal = ref(false)
 const modalSearchQuery = ref('')
 /** 有值时挂载向导；与 show 分离，挂载后始终 :show="true"，避免 Modal 先 false 再 true 闪烁 */
@@ -487,52 +508,17 @@ const newBook = ref({
   premise: '',
   genre: '',
   worldPreset: '',
+  storyStructure: '',
+  pacingControl: '',
+  writingStyle: '',
+  specialRequirements: '',
   chapters: 100,  // 默认 100 章
   words: 2500,
 })
 
 /** V1 目标篇幅档（与高级自定义二选一） */
-const lengthTier = ref<'short' | 'standard' | 'epic'>('standard')
-const lengthTierOptions = [
-  {
-    value: 'short' as const,
-    title: 'A · 短篇快穿 / 脑洞文',
-    hint: '约 30 万字（按约 2000 字/章推导章数）',
-  },
-  {
-    value: 'standard' as const,
-    title: 'B · 标准商业连载',
-    hint: '约 100 万字',
-  },
-  {
-    value: 'epic' as const,
-    title: 'C · 宏大史诗巨著',
-    hint: '约 300 万字',
-  },
-]
-
-const genreOptions = [
-  { label: '玄幻升级', value: '玄幻升级' },
-  { label: '都市爽文', value: '都市爽文' },
-  { label: '仙侠修真', value: '仙侠修真' },
-  { label: '科幻赛博', value: '科幻赛博' },
-  { label: '悬疑推理', value: '悬疑推理' },
-  { label: '历史架空', value: '历史架空' },
-  { label: '游戏异界', value: '游戏异界' },
-  { label: '言情甜宠', value: '言情甜宠' },
-  { label: '其他', value: '其他' },
-]
-
-const worldPresetOptions = [
-  { label: '修仙风（宗门、境界、机缘）', value: '修仙风' },
-  { label: '赛博朋克（巨企、义体、霓虹）', value: '赛博朋克风' },
-  { label: '悬疑风（谜题、反转、线索）', value: '悬疑风' },
-  { label: '高武江湖（门派、恩怨）', value: '高武江湖' },
-  { label: '末日废土（生存、资源）', value: '末日废土' },
-  { label: '西幻史诗（王国、种族）', value: '西幻史诗' },
-  { label: '现代都市（职场、日常）', value: '现代都市' },
-  { label: '克系诡异（未知、调查）', value: '克系诡异' },
-]
+const lengthTier = ref<NovelLengthTier>('standard')
+const lengthTierOptions = NOVEL_LENGTH_TIER_OPTIONS
 
 const filteredBooks = computed(() => {
   if (!searchQuery.value.trim()) {
@@ -584,30 +570,24 @@ const fetchBooks = async () => {
   loading.value = true
   try {
     const novels = await novelApi.listNovels()
-    books.value = novels.map((novel: NovelDTO) => ({
-      slug: novel.id,
-      title: novel.title,
-      stage: novel.stage,
-      stage_label: getStageLabel(novel.stage),
-      genre: '',
-      chapter_count: novel.chapters?.length || 0,
-      word_count: novel.total_word_count,
-    }))
+    books.value = novels.map((novel: NovelDTO) => {
+      const fromPrefix = parseGenreWorldFromPremise(novel.premise || '').genre
+      const g = novel.locked_genre?.trim() || fromPrefix || ''
+      return {
+        slug: novel.id,
+        title: novel.title,
+        stage: novel.stage,
+        stage_label: getNovelStageLabel(novel.stage),
+        genre: g,
+        chapter_count: novel.chapters?.length || 0,
+        word_count: novel.total_word_count,
+      }
+    })
   } catch {
     message.error('加载失败')
   } finally {
     loading.value = false
   }
-}
-
-const getStageLabel = (stage: string): string => {
-  const labels: Record<string, string> = {
-    planning: '规划中',
-    writing: '写作中',
-    reviewing: '审稿中',
-    completed: '已完成',
-  }
-  return labels[stage] || stage
 }
 
 const formatWordCount = (count: number): string => {
@@ -622,12 +602,16 @@ const handleCreate = async () => {
     message.warning('请输入核心梗概')
     return
   }
-  if (!newBook.value.genre) {
-    message.warning('请选择赛道 / 类型')
+  if (!newBook.value.genre.trim()) {
+    message.warning('请在「市场分区」中选定大类与主题')
     return
   }
-  if (!newBook.value.worldPreset) {
-    message.warning('请选择世界观基调')
+  if (!newBook.value.worldPreset.trim()) {
+    message.warning('请填写或确认世界观基调')
+    return
+  }
+  if (!newBook.value.storyStructure.trim() || !newBook.value.pacingControl.trim() || !newBook.value.writingStyle.trim() || !newBook.value.specialRequirements.trim()) {
+    message.warning('请补全四项写作规则')
     return
   }
 
@@ -643,6 +627,10 @@ const handleCreate = async () => {
       premise: newBook.value.premise.trim(),
       genre: newBook.value.genre,
       world_preset: newBook.value.worldPreset,
+      story_structure: newBook.value.storyStructure,
+      pacing_control: newBook.value.pacingControl,
+      writing_style: newBook.value.writingStyle,
+      special_requirements: newBook.value.specialRequirements,
     }
     const result = await novelApi.createNovel(
       showAdvanced.value
@@ -663,8 +651,8 @@ const handleCreate = async () => {
       novelId: result.id,
       targetChapters: result.target_chapters,
     }
-  } catch (error: any) {
-    message.error(error.response?.data?.detail || '创建失败')
+  } catch (error: unknown) {
+    message.error(formatApiError(error, '创建失败'))
   } finally {
     creating.value = false
   }
@@ -682,8 +670,18 @@ const handleSetupSkip = () => {
   if (id) router.push(`/book/${id}/workbench`)
 }
 
-const navigateToBook = (slug: string) => {
-  router.push(`/book/${slug}/workbench`)
+const navigateToBook = (novelId: string) => {
+  // 未完成向导的书重新打开向导
+  if (!isWizardCompleted(novelId)) {
+    // 查找该书的 target_chapters
+    const novel = books.value.find(b => b.slug === novelId)
+    setupWizard.value = {
+      novelId,
+      targetChapters: 100, // 默认值，向导内部会从 API 获取真实值
+    }
+    return
+  }
+  router.push(`/book/${novelId}/workbench`)
 }
 
 const handleDeleteBook = async (slug: string) => {
@@ -694,9 +692,8 @@ const handleDeleteBook = async (slug: string) => {
     books.value = books.value.filter(b => b.slug !== slug)
     selectedBooks.value = selectedBooks.value.filter(s => s !== slug)
     await statsStore.loadGlobalStats(true)
-  } catch (error: any) {
-    const detail = error?.response?.data?.detail
-    message.error(typeof detail === 'string' ? detail : '删除失败')
+  } catch (error: unknown) {
+    message.error(formatApiError(error, '删除失败'))
   } finally {
     deletingSlug.value = null
   }
@@ -764,13 +761,7 @@ const handleRefreshList = async () => {
 }
 
 const getStageType = (stage: string) => {
-  const map: Record<string, string> = {
-    planning: 'info',
-    writing: 'warning',
-    reviewing: 'default',
-    completed: 'success',
-  }
-  return map[stage] || 'default'
+  return getNovelStageTagType(stage)
 }
 
 onMounted(() => {
@@ -823,9 +814,26 @@ onMounted(() => {
 }
 
 .header {
+  position: relative;
   text-align: center;
   margin-bottom: 40px;
   animation: fade-up 0.55s ease both;
+}
+
+.header-theme-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  color: var(--app-text-secondary);
+}
+
+.header-theme-btn:hover {
+  color: var(--color-brand, #4f46e5);
+}
+
+.header-content {
+  padding: 0 44px;
 }
 
 .title {
@@ -878,8 +886,29 @@ onMounted(() => {
   line-height: 1.6;
 }
 
-.preset-row {
+.taxonomy-block {
   margin-top: 4px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.02);
+  border: 1px solid var(--app-border);
+}
+.taxonomy-block-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.taxonomy-block-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--app-text-primary);
+  letter-spacing: 0.04em;
+}
+.taxonomy-block-sub {
+  font-size: 12px;
+  color: var(--app-text-muted);
+  line-height: 1.45;
 }
 
 .length-tier-block {

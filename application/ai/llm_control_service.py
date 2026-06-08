@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
+from domain.ai.services.llm_service import DEFAULT_MAX_OUTPUT_TOKENS
+from infrastructure.ai.llm_environment import LLMEnvironmentSettings
 from infrastructure.persistence.database.connection import get_database
 from infrastructure.ai.url_utils import (
     normalize_anthropic_base_url,
@@ -18,6 +19,7 @@ from infrastructure.ai.url_utils import (
 logger = logging.getLogger(__name__)
 
 LLMProtocol = Literal['openai', 'anthropic', 'gemini']
+LLMEndpointMode = Literal['unified', 'independent']
 
 
 class LLMPreset(BaseModel):
@@ -41,7 +43,7 @@ class LLMProfile(BaseModel):
     api_key: str = ''
     model: str = ''
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     timeout_seconds: int = 300
     extra_headers: Dict[str, str] = Field(default_factory=dict)
     extra_query: Dict[str, Any] = Field(default_factory=dict)
@@ -76,6 +78,8 @@ class LLMProfile(BaseModel):
 class LLMControlConfig(BaseModel):
     version: int = 1
     active_profile_id: Optional[str] = None
+    #: 统一 = 单档案主力端点；独立 = 主力 / 经济 / 知识图谱 等分档案（持久化在 llm_config_meta）
+    endpoint_mode: LLMEndpointMode = 'unified'
     profiles: List[LLMProfile] = Field(default_factory=list)
 
     @model_validator(mode='after')
@@ -85,6 +89,8 @@ class LLMControlConfig(BaseModel):
         ids = [profile.id for profile in self.profiles]
         if not self.active_profile_id or self.active_profile_id not in ids:
             self.active_profile_id = ids[0]
+        if self.endpoint_mode not in ('unified', 'independent'):
+            self.endpoint_mode = 'unified'
         return self
 
 
@@ -144,7 +150,7 @@ class LLMControlService:
             api_key=row['api_key'] or '',
             model=row['model'] or '',
             temperature=row['temperature'],
-            max_tokens=row['max_tokens'],
+            max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
             timeout_seconds=row['timeout_seconds'],
             extra_headers=json.loads(row.get('extra_headers') or '{}'),
             extra_query=json.loads(row.get('extra_query') or '{}'),
@@ -293,7 +299,24 @@ class LLMControlService:
         if not active_id or active_id not in valid_ids:
             active_id = profiles[0].id
 
-        return LLMControlConfig(version=1, active_profile_id=active_id, profiles=profiles)
+        endpoint_mode = self._get_meta('endpoint_mode', '')
+        if endpoint_mode not in ('unified', 'independent'):
+            endpoint_mode = self._infer_endpoint_mode_from_profiles(profiles)
+        return LLMControlConfig(
+            version=1,
+            active_profile_id=active_id,
+            endpoint_mode=endpoint_mode,  # type: ignore[arg-type]
+            profiles=profiles,
+        )
+
+    @staticmethod
+    def _infer_endpoint_mode_from_profiles(profiles: List[LLMProfile]) -> LLMEndpointMode:
+        """无 meta 时的向后兼容：存在「经济模型」「知识图谱模型」档案则视为独立端点 UI。"""
+        for p in profiles:
+            n = p.name or ''
+            if '经济模型' in n or '知识图谱' in n or '知识图谱模型' in n:
+                return 'independent'
+        return 'unified'
 
     def save_config(self, config: LLMControlConfig) -> LLMControlConfig:
         """将配置全量写入数据库（先清后写）。"""
@@ -308,6 +331,10 @@ class LLMControlService:
         db.execute(
             "INSERT OR REPLACE INTO llm_config_meta (key, value) VALUES (?, ?)",
             ('active_profile_id', sanitized.active_profile_id or ''),
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO llm_config_meta (key, value) VALUES (?, ?)",
+            ('endpoint_mode', sanitized.endpoint_mode),
         )
 
         # 批量写入 profiles
@@ -425,7 +452,7 @@ class LLMControlService:
             )
             config = GenerationConfig(
                 model=resolved.model,
-                max_tokens=min(resolved.max_tokens, 64),
+                max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
                 temperature=0,
             )
             result = await llm_service.generate(prompt, config)
@@ -480,6 +507,7 @@ class LLMControlService:
                         'base_url': profile.base_url.strip(),
                         'api_key': profile.api_key.strip(),
                         'model': profile.model.strip(),
+                        'max_tokens': DEFAULT_MAX_OUTPUT_TOKENS,
                     }
                 )
             )
@@ -488,7 +516,13 @@ class LLMControlService:
             profiles = self._build_initial_config().profiles
 
         active_profile_id = config.active_profile_id if config.active_profile_id in {p.id for p in profiles} else profiles[0].id
-        return LLMControlConfig(version=1, active_profile_id=active_profile_id, profiles=profiles)
+        mode = config.endpoint_mode if config.endpoint_mode in ('unified', 'independent') else 'unified'
+        return LLMControlConfig(
+            version=1,
+            active_profile_id=active_profile_id,
+            endpoint_mode=mode,  # type: ignore[arg-type]
+            profiles=profiles,
+        )
 
     @staticmethod
     def _normalize_base_url(protocol: LLMProtocol, base_url: str) -> str:
@@ -527,34 +561,34 @@ class LLMControlService:
         ]
         active_profile_id = profiles[0].id
 
-        llm_provider = os.getenv('LLM_PROVIDER', '').strip().lower()
+        env = LLMEnvironmentSettings.from_env()
 
-        anthropic_key = (os.getenv('ANTHROPIC_API_KEY') or os.getenv('ANTHROPIC_AUTH_TOKEN') or '').strip()
-        openai_key = (os.getenv('OPENAI_API_KEY') or '').strip()
-        gemini_key = (os.getenv('GEMINI_API_KEY') or '').strip()
-        ark_key = (os.getenv('ARK_API_KEY') or '').strip()
+        anthropic_key = env.anthropic_api_key_with_token_fallback
+        openai_key = env.openai_api_key
+        gemini_key = env.gemini_api_key
+        ark_key = env.ark_api_key
 
-        if anthropic_key and (llm_provider == 'anthropic' or not llm_provider):
+        if anthropic_key and (env.provider == 'anthropic' or not env.provider):
             profiles[1] = profiles[1].model_copy(update={
                 'api_key': anthropic_key,
-                'base_url': (os.getenv('ANTHROPIC_BASE_URL') or '').strip() or profiles[1].base_url,
-                'model': (os.getenv('ANTHROPIC_MODEL') or '').strip() or profiles[1].model,
+                'base_url': env.anthropic_base_url or profiles[1].base_url,
+                'model': env.anthropic_model or profiles[1].model,
             })
             active_profile_id = profiles[1].id
-        elif openai_key and (llm_provider == 'openai' or not llm_provider):
+        elif openai_key and (env.provider == 'openai' or not env.provider):
             profiles[0] = profiles[0].model_copy(update={
                 'name': 'OpenAI / 兼容网关',
-                'preset_key': 'openai-official' if not os.getenv('OPENAI_BASE_URL') else 'custom-openai-compatible',
+                'preset_key': env.openai_preset_key,
                 'api_key': openai_key,
-                'base_url': (os.getenv('OPENAI_BASE_URL') or '').strip(),
-                'model': (os.getenv('OPENAI_MODEL') or '').strip(),
+                'base_url': env.openai_base_url,
+                'model': env.openai_model,
             })
             active_profile_id = profiles[0].id
         elif gemini_key:
             profiles[2] = profiles[2].model_copy(update={
                 'api_key': gemini_key,
-                'base_url': (os.getenv('GEMINI_BASE_URL') or '').strip() or profiles[2].base_url,
-                'model': (os.getenv('GEMINI_MODEL') or '').strip() or profiles[2].model,
+                'base_url': env.gemini_base_url or profiles[2].base_url,
+                'model': env.gemini_model or profiles[2].model,
             })
             active_profile_id = profiles[2].id
         elif ark_key:
@@ -562,9 +596,14 @@ class LLMControlService:
                 'name': '豆包 / Ark',
                 'preset_key': 'doubao-ark',
                 'api_key': ark_key,
-                'base_url': (os.getenv('ARK_BASE_URL') or '').strip() or 'https://ark.cn-beijing.volces.com/api/v3',
-                'model': (os.getenv('ARK_MODEL') or '').strip(),
+                'base_url': env.ark_base_url_or_default,
+                'model': env.ark_model,
             })
             active_profile_id = profiles[0].id
 
-        return LLMControlConfig(version=1, active_profile_id=active_profile_id, profiles=profiles)
+        return LLMControlConfig(
+            version=1,
+            active_profile_id=active_profile_id,
+            endpoint_mode='unified',
+            profiles=profiles,
+        )

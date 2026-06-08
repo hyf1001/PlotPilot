@@ -1,7 +1,8 @@
 import { apiClient } from './config'
+import { apiRoutes } from './endpoints'
 import type { BookStats } from '../types/api'
 
-function pickNumber(raw: Record<string, unknown>, keys: string[], fallback = 0): number {
+function pickNumber(raw: Record<string, unknown>, keys: string[], defaultValue = 0): number {
   for (const key of keys) {
     const v = raw[key]
     if (typeof v === 'number' && Number.isFinite(v)) {
@@ -14,17 +15,38 @@ function pickNumber(raw: Record<string, unknown>, keys: string[], fallback = 0):
       }
     }
   }
-  return fallback
+  return defaultValue
 }
 
-function pickString(raw: Record<string, unknown>, keys: string[], fallback = ''): string {
+function pickString(raw: Record<string, unknown>, keys: string[], defaultValue = ''): string {
   for (const key of keys) {
     const v = raw[key]
     if (typeof v === 'string') {
       return v
     }
   }
-  return fallback
+  return defaultValue
+}
+
+/** 与后端 novels.generation_prefs_json 一致（按需扩展） */
+export interface GenerationPrefsDTO {
+  phase_display_mode?: boolean
+  /** 兼容旧配置字段；当前版本不再驱动正文截断 */
+  smart_truncate_enabled?: boolean
+  /** 兼容旧配置字段；当前版本不再启用节拍硬帽 */
+  beat_hard_cap_enabled?: boolean
+  /** 落盘前段内碎片换行连片；默认关闭 */
+  inline_prose_aggregation_enabled?: boolean
+  conductor_converge_threshold?: number | null
+  conductor_land_threshold?: number | null
+  /** 每章审计结束后进入「待审阅」，需点恢复才写下一章；全自动书目仍跳过 */
+  pause_after_each_chapter_audit?: boolean
+  /** 叙事失败或文风仍不及格 → 待在审阅（与 pause 开关合用）*/
+  audit_pause_on_hard_fail?: boolean
+  /** Anti-AI 综合判定「严重」→ 待在审阅 */
+  audit_pause_on_anti_ai_severe?: boolean
+  /** 当前章节目标字数；兼容后端 generation_prefs_json 旧字段 */
+  target_chapter_words?: number
 }
 
 /**
@@ -86,6 +108,10 @@ export interface NovelDTO {
   /** 服务端从 premise 解析，优先用于「本书锁定」展示 */
   locked_genre?: string
   locked_world_preset?: string
+  locked_story_structure?: string
+  locked_pacing_control?: string
+  locked_writing_style?: string
+  locked_special_requirements?: string
   chapters: ChapterDTO[]
   total_word_count: number
   has_bible?: boolean
@@ -94,6 +120,8 @@ export interface NovelDTO {
   auto_approve_mode?: boolean
   /** 每章目标字数（与首页建档/PUT 一致；部分接口可能未返回） */
   target_words_per_chapter?: number
+  /** 生成偏好（全托管/指挥器） */
+  generation_prefs?: GenerationPrefsDTO
 }
 
 export const novelApi = {
@@ -101,13 +129,13 @@ export const novelApi = {
    * List all novels
    * GET /api/v1/novels
    */
-  listNovels: () => apiClient.get<NovelDTO[]>('/novels') as Promise<NovelDTO[]>,
+  listNovels: () => apiClient.get<NovelDTO[]>(apiRoutes.novels.root()) as Promise<NovelDTO[]>,
 
   /**
    * Get novel by ID
    * GET /api/v1/novels/{novelId}
    */
-  getNovel: (novelId: string) => apiClient.get<NovelDTO>(`/novels/${novelId}`) as Promise<NovelDTO>,
+  getNovel: (novelId: string) => apiClient.get<NovelDTO>(apiRoutes.novels.detail(novelId)) as Promise<NovelDTO>,
 
   /**
    * Create a new novel
@@ -121,42 +149,50 @@ export const novelApi = {
     premise?: string
     genre?: string
     world_preset?: string
+    story_structure?: string
+    pacing_control?: string
+    writing_style?: string
+    special_requirements?: string
     /** V1 体量档：与 target_chapters 二选一由后端解析 */
     length_tier?: 'short' | 'standard' | 'epic' | null
     target_words_per_chapter?: number | null
-  }) => apiClient.post<NovelDTO>('/novels', data) as Promise<NovelDTO>,
+  }) => apiClient.post<NovelDTO>(apiRoutes.novels.root(), data) as Promise<NovelDTO>,
 
   /**
    * Delete a novel
    * DELETE /api/v1/novels/{novelId}
    */
-  deleteNovel: (novelId: string) => apiClient.delete<void>(`/novels/${novelId}`) as Promise<void>,
+  deleteNovel: (novelId: string) => apiClient.delete<void>(apiRoutes.novels.detail(novelId)) as Promise<void>,
 
   /**
    * Update novel stage
    * PUT /api/v1/novels/{novelId}/stage
    */
   updateNovelStage: (novelId: string, stage: string) =>
-    apiClient.put<NovelDTO>(`/novels/${novelId}/stage`, { stage }) as Promise<NovelDTO>,
+    apiClient.put<NovelDTO>(apiRoutes.novels.stage(novelId), { stage }) as Promise<NovelDTO>,
 
   /**
    * Update novel basic information
    * PUT /api/v1/novels/{novelId}
    */
-  updateNovel: (novelId: string, data: { 
-    title?: string
-    author?: string
-    target_chapters?: number
-    premise?: string
-    target_words_per_chapter?: number
-  }) => apiClient.put<NovelDTO>(`/novels/${novelId}`, data) as Promise<NovelDTO>,
+  updateNovel: (
+    novelId: string,
+    data: {
+      title?: string
+      author?: string
+      target_chapters?: number
+      premise?: string
+      target_words_per_chapter?: number
+      generation_prefs?: Partial<GenerationPrefsDTO>
+    }
+  ) => apiClient.put<NovelDTO>(apiRoutes.novels.detail(novelId), data) as Promise<NovelDTO>,
 
   /**
    * 小说统计（与 Chapter 仓储一致，用于顶栏等；勿再用 /api/stats/book）
    * GET /api/v1/novels/{novelId}/statistics
    */
   getNovelStatistics: async (novelId: string): Promise<BookStats> => {
-    const raw = await apiClient.get<unknown>(`/novels/${novelId}/statistics`)
+    const raw = await apiClient.get<unknown>(apiRoutes.novels.statistics(novelId))
     return toBookStatsFromStatisticsPayload(raw, novelId)
   },
 
@@ -165,7 +201,7 @@ export const novelApi = {
    * PATCH /api/v1/novels/{novelId}/auto-approve-mode
    */
   updateAutoApproveMode: (novelId: string, autoApproveMode: boolean) =>
-    apiClient.patch<NovelDTO>(`/novels/${novelId}/auto-approve-mode`, { 
+    apiClient.patch<NovelDTO>(apiRoutes.novels.autoApproveModeClient(novelId), { 
       auto_approve_mode: autoApproveMode 
     }) as Promise<NovelDTO>,
 
@@ -174,7 +210,7 @@ export const novelApi = {
    * GET /api/v1/export/novel/{novelId}
    */
   exportNovel: (novelId: string, format: string) =>
-    apiClient.get<Blob>(`/export/novel/${novelId}`, {
+    apiClient.get<Blob>(apiRoutes.novels.exportNovel(novelId), {
       params: { format },
       responseType: 'blob'
     }) as Promise<Blob>,
@@ -184,7 +220,7 @@ export const novelApi = {
    * GET /api/v1/export/chapter/{chapterId}
    */
   exportChapter: (chapterId: string, format: string) =>
-    apiClient.get<Blob>(`/export/chapter/${chapterId}`, {
+    apiClient.get<Blob>(apiRoutes.novels.exportChapter(chapterId), {
       params: { format },
       responseType: 'blob'
     }) as Promise<Blob>,

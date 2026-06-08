@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
-from domain.ai.services.llm_service import LLMService, GenerationConfig
-from domain.ai.value_objects.prompt import Prompt
+from domain.ai.services.llm_service import LLMService
 from domain.novel.value_objects.tension_dimensions import TensionDimensions
 from application.ai.tension_scoring_contract import (
     TensionScoringLlmPayload,
@@ -17,28 +15,22 @@ from application.ai.tension_scoring_contract import (
     tension_scoring_response_format,
 )
 from application.ai.structured_json_pipeline import structured_json_generate
-from infrastructure.ai.prompt_manager import get_prompt_manager
+from infrastructure.ai.generation_profiles import generation_config_from_profile
+from infrastructure.ai.prompt_contract import PromptContract
+from infrastructure.ai.prompt_gateway import PromptGatewayError, get_prompt_gateway
+from infrastructure.ai.prompt_keys import TENSION_SCORING
 
 logger = logging.getLogger(__name__)
 
 # 章节正文最大长度（与 llm_chapter_extract_bundle 保持一致）
 _MAX_CONTENT_LENGTH = 24000
 
-# PromptManager / DB 不可用时使用的兜底 system
-_FALLBACK_TEMPLATE = """你是专业的网文叙事张力分析师。你的任务是分析章节正文的多维张力。
-
-## 评分维度（每项 0-100 整数）
-
-### 1. 情节张力 (plot_tension)
-衡量冲突强度、悬念密度和信息不对称程度。
-### 2. 情绪张力 (emotional_tension)
-衡量角色情绪波动幅度和读者共情深度。
-### 3. 节奏张力 (pacing_tension)
-衡量场景切换频率、叙述节奏和信息密度。
-
-前章综合张力约为 {prev_tension}/100。
-
-输出 JSON：{{"plot_tension": 0, "emotional_tension": 0, "pacing_tension": 0, "plot_justification": "", "emotional_justification": "", "pacing_justification": ""}}"""
+_TENSION_SCORING_CONTRACT = PromptContract(
+    node_key=TENSION_SCORING,
+    version="1.0.0",
+    output_schema=TensionScoringLlmPayload,
+    generation_profile="tension_scoring",
+)
 
 
 class TensionScoringService:
@@ -69,17 +61,23 @@ class TensionScoringService:
         """
         body = chapter_content.strip()
         if not body:
-            return TensionDimensions.neutral()
+            return TensionDimensions.unevaluated()
         if len(body) > _MAX_CONTENT_LENGTH:
             body = body[:_MAX_CONTENT_LENGTH] + "\n\n…（正文过长已截断）"
 
-        prompt = Prompt(
-            system=self._build_system_prompt(prev_chapter_tension),
-            user=f"第 {chapter_number} 章正文如下：\n\n{body}",
-        )
-        config = GenerationConfig(
-            max_tokens=512,
-            temperature=0.3,
+        try:
+            prompt = get_prompt_gateway().render(
+                _TENSION_SCORING_CONTRACT,
+                {
+                    "content": body,
+                    "prev_tension": f"{prev_chapter_tension:.0f}",
+                },
+            ).prompt
+        except PromptGatewayError as exc:
+            logger.warning("张力评分提示词渲染失败: %s", exc)
+            return TensionDimensions.unevaluated()
+        config = generation_config_from_profile(
+            "tension_scoring",
             response_format=tension_scoring_response_format(),
         )
 
@@ -95,7 +93,7 @@ class TensionScoringService:
             payload = None
 
         if payload is None:
-            return TensionDimensions.neutral()
+            return TensionDimensions.unevaluated()
 
         dims = tension_scoring_payload_to_domain(payload)
         logger.debug(
@@ -106,17 +104,3 @@ class TensionScoringService:
             dims.composite_score,
         )
         return dims
-
-    # ------------------------------------------------------------------
-    # Prompt 构建
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_system_prompt(prev_tension: float) -> str:
-        mgr = get_prompt_manager()
-        mgr.ensure_seeded()
-        prev = f"{prev_tension:.0f}"
-        rendered = mgr.render("tension-scoring", {"prev_tension": prev})
-        if rendered and (rendered.get("system") or "").strip():
-            return rendered["system"]
-        return _FALLBACK_TEMPLATE.format(prev_tension=prev)

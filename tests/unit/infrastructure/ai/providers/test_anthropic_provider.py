@@ -2,9 +2,20 @@
 import pytest
 from unittest.mock import AsyncMock, Mock
 from domain.ai.value_objects.prompt import Prompt
-from domain.ai.services.llm_service import GenerationConfig
+from domain.ai.services.llm_service import DEFAULT_MAX_OUTPUT_TOKENS, GenerationConfig
 from infrastructure.ai.config.settings import Settings
 from infrastructure.ai.providers.anthropic_provider import AnthropicProvider
+
+
+class _AsyncStreamCM:
+    def __init__(self, text_stream):
+        self.text_stream = text_stream
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
 
 
 class TestAnthropicProvider:
@@ -51,7 +62,7 @@ class TestAnthropicProvider:
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["model"] == "claude-3-5-sonnet-20241022"
         assert call_kwargs['temperature'] == 0.7
-        assert call_kwargs['max_tokens'] == 4096
+        assert call_kwargs['max_tokens'] == DEFAULT_MAX_OUTPUT_TOKENS
 
     @pytest.mark.asyncio
     async def test_generate_with_custom_config(self, provider):
@@ -74,7 +85,7 @@ class TestAnthropicProvider:
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs['model'] == "claude-3-opus-20240229"
         assert call_kwargs['temperature'] == 0.5
-        assert call_kwargs['max_tokens'] == 2048
+        assert call_kwargs['max_tokens'] == DEFAULT_MAX_OUTPUT_TOKENS
 
     @pytest.mark.asyncio
     async def test_generate_accepts_text_blocks_without_type(self, provider):
@@ -150,3 +161,48 @@ class TestAnthropicProvider:
 
         with pytest.raises(ValueError, match="API key is required"):
             AnthropicProvider(settings)
+
+    @pytest.mark.asyncio
+    async def test_stream_generate_falls_back_to_sdk_on_httpx_read_error(self, provider):
+        """httpx SSE 被网关提前断开时，应回退到 SDK stream。"""
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig(max_tokens=128)
+
+        async def _broken_httpx(*args, **kwargs):
+            if False:
+                yield ""
+            raise __import__("httpx").ReadError("")
+
+        provider._stream_via_httpx = _broken_httpx
+
+        async def _sdk_text_stream():
+            yield "fallback"
+
+        provider.async_client.messages.stream = Mock(
+            return_value=_AsyncStreamCM(_sdk_text_stream())
+        )
+
+        chunks = [chunk async for chunk in provider.stream_generate(prompt, config)]
+
+        assert chunks == ["fallback"]
+        provider.async_client.messages.stream.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stream_generate_reports_both_failures(self, provider):
+        """httpx 与 SDK 均失败时，错误信息应包含两种失败原因。"""
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig(max_tokens=128)
+
+        async def _broken_httpx(*args, **kwargs):
+            if False:
+                yield ""
+            raise __import__("httpx").ReadError("")
+
+        provider._stream_via_httpx = _broken_httpx
+        provider.async_client.messages.stream = Mock(
+            side_effect=RuntimeError("SDK stream unavailable")
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to stream text: httpx=ReadError"):
+            async for _ in provider.stream_generate(prompt, config):
+                pass

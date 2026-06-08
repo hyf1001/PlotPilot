@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from domain.ai.services.llm_service import GenerationConfig
+from domain.ai.services.llm_service import DEFAULT_MAX_OUTPUT_TOKENS, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from infrastructure.ai.config.settings import Settings
 from infrastructure.ai.providers.openai_provider import OpenAIProvider
@@ -68,7 +68,7 @@ class TestOpenAIProviderLegacy:
             call_kwargs = mock_create.call_args.kwargs
             assert call_kwargs["model"] == "gpt-4o"
             assert call_kwargs["temperature"] == 0.7
-            assert call_kwargs["max_tokens"] == 4096
+            assert call_kwargs["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
 
     @pytest.mark.anyio
     async def test_generate_accepts_message_content_as_list_of_text_parts(self, provider):
@@ -210,7 +210,7 @@ class TestOpenAIProviderResponses:
             call_kwargs = mock_create.call_args.kwargs
             assert call_kwargs["model"] == "gpt-4o"
             assert call_kwargs["temperature"] == 0.5
-            assert call_kwargs["max_output_tokens"] == 2048
+            assert call_kwargs["max_output_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
 
     @pytest.mark.anyio
     async def test_generate_responses_joins_multiple_text_parts(self, provider):
@@ -255,6 +255,24 @@ class TestOpenAIProviderResponses:
             chunks = [chunk async for chunk in provider.stream_generate(prompt, config)]
 
             assert chunks == ["Hello"]
+            assert mock_create.await_args.kwargs["stream"] is True
+
+    @pytest.mark.anyio
+    async def test_stream_generate_extracts_output_text_delta(self, provider):
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig(model="gpt-4o", temperature=0.7, max_tokens=32)
+        stream = _FakeStream([
+            SimpleNamespace(type="response.output_text.delta", delta="Hel"),
+            SimpleNamespace(type="response.output_text.delta", delta="lo"),
+            SimpleNamespace(type="response.completed"),
+        ])
+
+        with patch.object(provider.async_client.responses, "create", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = stream
+
+            chunks = [chunk async for chunk in provider.stream_generate(prompt, config)]
+
+            assert chunks == ["Hel", "lo"]
             assert mock_create.await_args.kwargs["stream"] is True
 
     @pytest.mark.anyio

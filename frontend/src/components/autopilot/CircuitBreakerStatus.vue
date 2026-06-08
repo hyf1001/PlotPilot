@@ -10,11 +10,8 @@
         {{ statusLabel }}
       </n-tag>
     </div>
-    <n-text depth="3" style="font-size: 11px; line-height: 1.45; display: block; margin: -4px 0 8px">
-      单本连续失败达到阈值会挂起；未启动托管时多为「正常」。
-      守护进程内另有<strong>全局</strong> LLM 熔断（防 API 雪崩），本卡无法显示其开闭；若所有书长时间不推进，请查看
-      <code style="font-size:10px">logs/autopilot_daemon.log</code>
-      或重启守护进程并等待冷却。
+    <n-text depth="3" class="breaker-lede">
+      达阈值自动挂起。全局 LLM 熔断由守护进程控制；长时间不推进请查看日志或重启守护进程。
     </n-text>
 
     <div class="breaker-body">
@@ -122,25 +119,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { resolveHttpUrl } from '@/api/config'
-
-interface ErrorRecord {
-  message: string
-  timestamp: string
-  context?: string
-}
-
-interface CircuitBreakerData {
-  status: 'closed' | 'open' | 'half_open'
-  error_count: number
-  max_errors: number
-  last_error?: ErrorRecord
-  error_history?: ErrorRecord[]
-}
+import { ref, computed, watch, onMounted } from 'vue'
+import {
+  autopilotApi,
+  isAutopilotNotFoundError,
+  type AutopilotCircuitBreakerData,
+} from '@/api/autopilot'
+import { usePolling } from '@/composables/usePolling'
 
 const props = defineProps<{
   novelId: string
+  refreshKey?: number  // 🔥 刷新信号，变化时重新拉数据
 }>()
 
 const emit = defineEmits<{
@@ -148,7 +137,7 @@ const emit = defineEmits<{
   'breaker-reset': []
 }>()
 
-const breakerData = ref<CircuitBreakerData>({
+const breakerData = ref<AutopilotCircuitBreakerData>({
   status: 'closed',
   error_count: 0,
   max_errors: 3
@@ -156,7 +145,6 @@ const breakerData = ref<CircuitBreakerData>({
 const showHistoryModal = ref(false)
 const loading = ref(false)
 
-let pollTimer: number | null = null
 /** 该书在库中不存在(404)时不再轮询，避免旧标签页刷屏 */
 let pollStopped404 = false
 
@@ -231,25 +219,20 @@ const statusSubtext = computed(() => {
 async function loadBreakerData() {
   loading.value = true
   try {
-    const res = await fetch(
-      resolveHttpUrl(`/api/v1/autopilot/${props.novelId}/circuit-breaker`),
-    )
-    if (res.status === 404) {
-      stopPolling()
-      pollStopped404 = true
-      return
-    }
-    if (res.ok) {
-      const data = await res.json()
-      const prevStatus = breakerData.value.status
-      breakerData.value = data
+    const data = await autopilotApi.getCircuitBreaker(props.novelId)
+    const prevStatus = breakerData.value.status
+    breakerData.value = data
 
-      // 触发熔断事件
-      if (prevStatus !== 'open' && data.status === 'open') {
-        emit('breaker-open')
-      }
+    // 触发熔断事件
+    if (prevStatus !== 'open' && data.status === 'open') {
+      emit('breaker-open')
     }
   } catch (err) {
+    if (isAutopilotNotFoundError(err)) {
+      pollStopped404 = true
+      polling.stop()
+      return
+    }
     console.error('Failed to load circuit breaker data:', err)
   } finally {
     loading.value = false
@@ -259,17 +242,10 @@ async function loadBreakerData() {
 // 重置熔断器
 async function handleReset() {
   try {
-    const res = await fetch(
-      resolveHttpUrl(`/api/v1/autopilot/${props.novelId}/circuit-breaker/reset`),
-      { method: 'POST' },
-    )
-    if (res.ok) {
-      await loadBreakerData()
-      emit('breaker-reset')
-      window.$message?.success('熔断器已重置')
-    } else {
-      window.$message?.error('重置失败')
-    }
+    await autopilotApi.resetCircuitBreaker(props.novelId)
+    await loadBreakerData()
+    emit('breaker-reset')
+    window.$message?.success('熔断器已重置')
   } catch (err) {
     console.error('Failed to reset circuit breaker:', err)
     window.$message?.error('重置失败')
@@ -297,22 +273,15 @@ function formatTime(timestamp: string): string {
   }
 }
 
+const polling = usePolling(loadBreakerData, 10000)
+
 // 定时轮询（每 10 秒）；先等首包再挂 interval，避免 404 后仍启动定时器
 async function startPolling() {
-  stopPolling()
+  polling.stop()
   pollStopped404 = false
   await loadBreakerData()
   if (pollStopped404) return
-  pollTimer = window.setInterval(() => {
-    void loadBreakerData()
-  }, 10000)
-}
-
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+  polling.start()
 }
 
 // 监听
@@ -320,13 +289,14 @@ watch(() => props.novelId, () => {
   void startPolling()
 })
 
+// 🔥 刷新信号变化时重新加载（由 Dashboard 的 SSE 事件驱动）
+watch(() => props.refreshKey, (newKey) => {
+  if (newKey && newKey > 0) void loadBreakerData()
+})
+
 // 生命周期
 onMounted(() => {
   void startPolling()
-})
-
-onUnmounted(() => {
-  stopPolling()
 })
 </script>
 
@@ -334,15 +304,15 @@ onUnmounted(() => {
 .circuit-breaker-status {
   background: var(--card-color);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
 }
 
 .breaker-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .breaker-title {
@@ -354,13 +324,20 @@ onUnmounted(() => {
 .breaker-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+}
+
+.breaker-lede {
+  font-size: 11px;
+  line-height: 1.5;
+  display: block;
+  margin: 0 0 2px;
 }
 
 .status-indicator {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 14px;
 }
 
 .indicator-ring {
@@ -413,8 +390,10 @@ onUnmounted(() => {
 .status-text {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   flex: 1;
+  min-width: 0;
+  padding-top: 4px;
 }
 
 .status-main {

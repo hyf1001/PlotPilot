@@ -89,9 +89,12 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { bibleApi } from '../../api/bible'
 import type { TimelineNoteDTO } from '../../api/bible'
+import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
+import { formatApiError, getHttpStatus } from '@/utils/apiError'
 
 interface Props {
   slug: string
@@ -124,9 +127,9 @@ const loadTimeline = async () => {
   try {
     const bible = await bibleApi.getBible(props.slug)
     timelineEvents.value = bible.timeline_notes || []
-  } catch (error: any) {
-    if (error?.response?.status !== 404) {
-      message.error(error.response?.data?.detail || '加载时间线失败')
+  } catch (error: unknown) {
+    if (getHttpStatus(error) !== 404) {
+      message.error(formatApiError(error, '加载时间线失败'))
     }
   } finally {
     loading.value = false
@@ -183,14 +186,19 @@ const saveTimeline = async () => {
       timeline_notes: timelineEvents.value
     })
     message.success('时间线已保存')
-  } catch (error: any) {
-    message.error(error.response?.data?.detail || '保存时间线失败')
+  } catch (error: unknown) {
+    message.error(formatApiError(error, '保存时间线失败'))
   }
 }
 
 watch(() => props.slug, (slug) => {
   if (slug) loadTimeline()
 })
+
+// 🔥 监听 chroniclesTick：autopilot 审计完成后刷新时间线（Bible timeline_notes 变化时同步）
+const refreshStore = useWorkbenchRefreshStore()
+const { chroniclesTick } = storeToRefs(refreshStore)
+watch(chroniclesTick, () => void loadTimeline())
 
 onMounted(() => {
   loadTimeline()
@@ -203,12 +211,12 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--aitext-panel-muted);
+  background: var(--plotpilot-panel-muted);
 }
 
 .panel-header {
   padding: 16px;
-  border-bottom: 1px solid var(--aitext-split-border);
+  border-bottom: 1px solid var(--plotpilot-split-border);
   background: var(--app-surface);
   display: flex;
   justify-content: space-between;

@@ -2,15 +2,19 @@
 import logging
 from typing import Dict, Any
 from domain.ai.services.llm_service import LLMService, GenerationConfig
-from domain.ai.value_objects.prompt import Prompt
 from application.ai.knowledge_llm_contract import (
-    build_initial_knowledge_system_prompt,
     parse_initial_knowledge_llm_response,
     to_knowledge_service_update_dict,
 )
 from application.world.services.knowledge_service import KnowledgeService
+from infrastructure.ai.prompt_keys import KNOWLEDGE_INITIAL
+from infrastructure.ai.prompt_utils import render_required_prompt
 
 logger = logging.getLogger(__name__)
+
+
+class AutoKnowledgeGenerationError(RuntimeError):
+    """初始 Knowledge 生成失败；禁止用空知识图谱伪装成功。"""
 
 
 class AutoKnowledgeGenerator:
@@ -54,30 +58,22 @@ class AutoKnowledgeGenerator:
         return knowledge_data
 
     async def _generate_knowledge_data(self, title: str, bible_summary: str) -> Dict[str, Any]:
-        """使用 LLM 生成 Knowledge 数据"""
+        """使用 LLM 生成 Knowledge 数据（CPMS 统一入口）"""
+        variables = {
+            "title": title,
+            "bible_summary": bible_summary or "",
+        }
+        prompt = render_required_prompt(KNOWLEDGE_INITIAL, variables)
 
-        context_section = f"\n\n**小说设定摘要：**\n{bible_summary}" if bible_summary.strip() else ""
-
-        system_prompt = build_initial_knowledge_system_prompt()
-        user_prompt = f"小说标题：《{title}》{context_section}"
-
-        prompt = Prompt(system=system_prompt, user=user_prompt)
         config = GenerationConfig(max_tokens=2048, temperature=0.4)
 
         result = await self.llm_service.generate(prompt, config)
 
         payload, errors = parse_initial_knowledge_llm_response(result.content)
         if payload is None:
-            logger.warning(
-                "AutoKnowledgeGenerator: LLM 输出未通过契约校验: %s",
-                "; ".join(errors) if errors else "unknown",
-            )
-            return {
-                "version": 1,
-                "premise_lock": "",
-                "chapters": [],
-                "facts": [],
-            }
+            message = "; ".join(errors) if errors else "unknown"
+            logger.error("AutoKnowledgeGenerator: LLM 输出未通过契约校验: %s", message)
+            raise AutoKnowledgeGenerationError(f"初始 Knowledge LLM 输出未通过契约校验: {message}")
 
         return to_knowledge_service_update_dict(payload)
 

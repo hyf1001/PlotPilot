@@ -10,7 +10,10 @@ from typing import List, Optional, Dict, Any, TYPE_CHECKING, Set
 
 from domain.novel.value_objects.chapter_id import ChapterId
 from domain.novel.value_objects.novel_id import NovelId
-from domain.structure.story_node import StoryNode, StoryTree, NodeType
+from domain.structure.story_node import StoryNode, NodeType
+from application.blueprint.services.chapter_book_structure_sync import (
+    purge_chapter_book_rows_not_matching_structure,
+)
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 
 if TYPE_CHECKING:
@@ -24,8 +27,9 @@ class StoryStructureService:
 
     核心特性：
     1. AI 动态规划：利用 LLM 生成"部-卷-幕"结构，非固定模板
-    2. 安全合并机制：带有血缘继承的智能合并，保护已有正文章节
-    3. 持续优化：支持通过提示词迭代和测试不断提升规划质量
+    2. 安全合并机制：带有血缘继承的智能合并
+    3. 结构与正文表对齐：显式删节点时同步清理正文占位；读整树不做破坏性清理
+    4. 持续优化：支持通过提示词迭代和测试不断提升规划质量
     """
 
     def __init__(
@@ -88,7 +92,13 @@ class StoryStructureService:
             n["status"] = st
 
     async def get_tree(self, novel_id: str) -> Dict[str, Any]:
-        """获取小说的完整结构树"""
+        """获取小说的完整结构树。"""
+        # 注意：读接口必须无副作用。
+        # 守护进程写入章节规划和前端刷新结构树可能并发发生；如果在读路径里做
+        # “结构↔正文”清理，API 进程可能基于尚未刷新到当前连接快照的结构树，
+        # 误删刚生成的正文章节，并触发章节仓储的重排级联删除 story_nodes。
+        # 因此这里只展示结构；真正的级联清理只放在显式删除/重规划等写路径。
+
         tree = await self.repository.get_tree(novel_id)
         data = tree.to_tree_dict()
         self._enrich_chapter_nodes_from_chapters_table(novel_id, data.get("nodes") or [])
@@ -208,17 +218,30 @@ class StoryStructureService:
                 self._chapter_repository.delete(ChapterId(chapter_id))
                 coordinator = self._chapter_renumber_coordinator
                 if coordinator is not None:
-                    coordinator.on_chapter_deleted(node.novel_id, chapter_number, chapter_id)
+                    coordinator.on_chapter_deleted(node.novel_id, chapter_number)
                 deleted_any = True
 
+        novel_id_scope = node.novel_id
+        outcome: bool
         remaining = await self.repository.get_by_id(node_id)
         if remaining is None:
-            return node.node_type == NodeType.CHAPTER and deleted_any
-
-        deleted_node = await self.repository.delete(node_id)
-        if deleted_node:
-            return True
-        return False
+            outcome = node.node_type == NodeType.CHAPTER and deleted_any
+        else:
+            deleted_node = await self.repository.delete(node_id)
+            if deleted_node:
+                outcome = True
+            elif await self.repository.get_by_id(node_id) is None:
+                outcome = True
+            else:
+                outcome = False
+        # 删掉子树后再扫一遍全书，摘掉「树上没有的」残留正文行。
+        if outcome and self._chapter_repository is not None:
+            purge_chapter_book_rows_not_matching_structure(
+                self.repository,
+                self._chapter_repository,
+                novel_id_scope,
+            )
+        return outcome
 
     async def reorder_nodes(self, node_ids: List[str]) -> List[Dict[str, Any]]:
         """重新排序节点"""

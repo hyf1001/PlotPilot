@@ -26,8 +26,8 @@ class SqliteChapterRepository(ChapterRepository):
         sql = """
             INSERT INTO chapters (id, novel_id, number, title, content, outline, status,
                                   tension_score, plot_tension, emotional_tension, pacing_tension,
-                                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  generation_hint, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 content = excluded.content,
@@ -37,6 +37,7 @@ class SqliteChapterRepository(ChapterRepository):
                 plot_tension = excluded.plot_tension,
                 emotional_tension = excluded.emotional_tension,
                 pacing_tension = excluded.pacing_tension,
+                generation_hint = excluded.generation_hint,
                 updated_at = excluded.updated_at
         """
         now = datetime.utcnow().isoformat()
@@ -49,16 +50,16 @@ class SqliteChapterRepository(ChapterRepository):
             chapter.number,
             chapter.title,
             chapter.content,
-            chapter.outline,  # 使用实体的 outline 字段
+            chapter.outline,
             status,
             chapter.tension_score,
             chapter.plot_tension,
             chapter.emotional_tension,
             chapter.pacing_tension,
+            getattr(chapter, 'generation_hint', ''),
             now,
             now
         ))
-        self.db.get_connection().commit()
         logger.info(f"Saved chapter: {chapter_id}")
 
     def get_by_id(self, chapter_id: ChapterId) -> Optional[Chapter]:
@@ -89,10 +90,41 @@ class SqliteChapterRepository(ChapterRepository):
         return [self._row_to_chapter(row) for row in rows]
 
     def delete(self, chapter_id: ChapterId) -> None:
-        """删除章节：事务内清理关联、删除行，并将更大章节号整体下移 1（级联相关表）。"""
+        """删除章节：单写者内核下 API 线程只入队，由持久化消费者在 writer 上执行。"""
+        from infrastructure.persistence.database.write_dispatch import (
+            allow_direct_sqlite_writes,
+            enqueue_delete_chapter,
+            is_sqlite_writer_thread,
+        )
+
+        if allow_direct_sqlite_writes() or is_sqlite_writer_thread():
+            self.execute_delete_on_writer(chapter_id)
+            return
+
         chapter = self.get_by_id(chapter_id)
         if not chapter:
             logger.warning(f"Chapter not found for deletion: {chapter_id.value}")
+            return
+
+        cid = chapter_id.value
+        if enqueue_delete_chapter(cid):
+            logger.info(
+                "章节删除已入队 %s novel=%s number=%s",
+                cid,
+                chapter.novel_id.value
+                if hasattr(chapter.novel_id, "value")
+                else chapter.novel_id,
+                chapter.number,
+            )
+            return
+
+        raise RuntimeError("持久化队列未就绪，章节删除未能入队")
+
+    def execute_delete_on_writer(self, chapter_id: ChapterId) -> None:
+        """仅在持久化消费者线程或直接写库模式下调用；保持原事务体（含 FK 切换与容错 DELETE）。"""
+        chapter = self.get_by_id(chapter_id)
+        if not chapter:
+            logger.warning(f"Chapter not found for deletion (writer): {chapter_id.value}")
             return
 
         novel_id = chapter.novel_id.value if hasattr(chapter.novel_id, 'value') else chapter.novel_id
@@ -586,4 +618,5 @@ class SqliteChapterRepository(ChapterRepository):
             plot_tension=row.get('plot_tension', 50.0),
             emotional_tension=row.get('emotional_tension', 50.0),
             pacing_tension=row.get('pacing_tension', 50.0),
+            generation_hint=row.get('generation_hint', '') or '',
         )

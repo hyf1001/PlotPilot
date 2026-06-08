@@ -1,53 +1,42 @@
-"""SceneDirectorService - 场景导演服务，基于 LLM 的大纲分析"""
+"""SceneDirectorService - CPMS-backed scene director analysis."""
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 from application.ai.llm_json_extract import parse_llm_json_to_dict
-from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
+from application.ai.trace_context import ensure_trace
+from application.engine.dtos.scene_director_dto import ActionTransitionGraphPayload, SceneDirectorAnalysis
 from domain.ai.services.llm_service import GenerationConfig, LLMService
-from domain.ai.value_objects.prompt import Prompt
+from infrastructure.ai.llm_environment import LLMEnvironmentSettings
+from infrastructure.ai.prompt_keys import SCENE_DIRECTOR as _SCENE_DIRECTOR_NODE_KEY
+from infrastructure.ai.prompt_utils import render_required_prompt
 
 logger = logging.getLogger(__name__)
 
-SCENE_DIRECTOR_SYSTEM = """你是小说场记。根据给定章节大纲，只输出一个 JSON 对象，键为：
-characters, locations, action_types, trigger_keywords, emotional_state, pov, performance_notes。
-characters/locations/action_types/trigger_keywords/performance_notes 均为字符串数组；emotional_state 为简短英文或中文单词；pov 为视点人物名字符串或 null。
-performance_notes 是可选的表演指令列表，描述动作级别的导演指示（如"眼神闪烁"、"握紧拳头"）。
-注意：不要在表演指令中透露角色的隐藏身份或设定，只描述可观察的动作和情绪。
-不要 markdown，不要解释。"""
-
 
 class SceneDirectorService:
-    """场景导演服务 - 使用 LLM 分析章节大纲"""
+    """Scene director service backed by CPMS prompt templates."""
 
-    # LLM generation configuration constants
-    _DEFAULT_MAX_TOKENS = 1024
+    _DEFAULT_MAX_TOKENS = 4096
     _DEFAULT_TEMPERATURE = 0.2
 
     def __init__(self, llm_service: LLMService, *, model: str = ""):
         self._llm = llm_service
-        self._model = model or os.getenv("SYSTEM_MODEL", "")
+        self._model = model or LLMEnvironmentSettings.from_env().system_model
 
     async def analyze(self, chapter_number: int, outline: str) -> SceneDirectorAnalysis:
-        """分析章节大纲，提取场景信息
-
-        Args:
-            chapter_number: 章节号
-            outline: 章节大纲文本
-
-        Returns:
-            SceneDirectorAnalysis: 分析结果
-        """
-        user = f"章节号: {chapter_number}\n大纲:\n{outline.strip()}"
-        prompt = Prompt(system=SCENE_DIRECTOR_SYSTEM, user=user)
+        """Analyze a chapter outline and extract scene-director metadata."""
+        prompt = render_required_prompt(
+            _SCENE_DIRECTOR_NODE_KEY,
+            {"outline": f"Chapter {chapter_number}\n{outline.strip()}"},
+        )
         config = GenerationConfig(
             model=self._model,
             max_tokens=self._DEFAULT_MAX_TOKENS,
             temperature=self._DEFAULT_TEMPERATURE,
         )
+        ensure_trace(novel_id="", stage="engine.scene.director", stage_label="场景导演")
         raw = await self._llm.generate(prompt, config)
         data, errs = parse_llm_json_to_dict(raw.content)
         if not data:
@@ -110,6 +99,16 @@ class SceneDirectorService:
         else:
             emotional_state = str(emotional_state).strip()
 
+        atg_payload: Optional[ActionTransitionGraphPayload] = None
+        raw_atg = data.get("atg")
+        if not isinstance(raw_atg, dict):
+            raw_atg = data.get("action_transition_graph")
+        if isinstance(raw_atg, dict):
+            try:
+                atg_payload = ActionTransitionGraphPayload.model_validate(raw_atg)
+            except Exception as exc:
+                logger.warning("scene director ATG validation failed: %s", exc)
+
         return SceneDirectorAnalysis(
             characters=as_str_list("characters"),
             locations=as_str_list("locations"),
@@ -118,4 +117,5 @@ class SceneDirectorService:
             emotional_state=emotional_state,
             pov=pov,
             performance_notes=as_optional_str_list("performance_notes"),
+            action_transition_graph=atg_payload,
         )

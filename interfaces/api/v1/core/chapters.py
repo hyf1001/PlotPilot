@@ -1,6 +1,6 @@
 """Chapter API 路由"""
 import logging
-from typing import List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
@@ -10,15 +10,33 @@ from application.core.services.novel_service import NovelService
 from application.core.dtos.chapter_dto import ChapterDTO
 from application.core.dtos.novel_dto import NovelDTO
 from application.audit.dtos.chapter_review_dto import ChapterReviewDTO
+from application.audit.services.chapter_ai_review_service import (
+    ChapterAIReviewContractError,
+    ChapterAIReviewService,
+)
 from application.core.dtos.chapter_structure_dto import ChapterStructureDTO
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
+from application.manuscript.reindex_job import reindex_chapter_entity_mentions
+from interfaces.api.v1.engine.checkpoint_routes import GuardrailCheckResponse
 from interfaces.api.dependencies import (
     get_chapter_service,
     get_novel_service,
     get_chapter_aftermath_pipeline,
+    get_chapter_repository,
+    get_knowledge_service,
+    get_chapter_ai_review_service,
 )
+from application.world.services.knowledge_service import KnowledgeService
+from infrastructure.persistence.database.chapter_draft_repository import ChapterDraftRepository
+from application.paths import get_db_path
 from domain.shared.exceptions import EntityNotFoundError
 logger = logging.getLogger(__name__)
+
+
+def _get_draft_repo() -> ChapterDraftRepository:
+    from infrastructure.persistence.database.connection import DatabaseConnection
+    db_path = get_db_path()
+    return ChapterDraftRepository(DatabaseConnection(db_path))
 
 
 async def _run_chapter_aftermath(
@@ -26,18 +44,43 @@ async def _run_chapter_aftermath(
     chapter_number: int,
     content: str,
     pipeline: ChapterAftermathPipeline,
+    chapter_micro_beats: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """与托管/守护进程同源的章后管线（叙事/向量、文风、KG；三元组与伏笔单次 LLM）。"""
-    await pipeline.run_after_chapter_saved(novel_id, chapter_number, content)
+    await pipeline.run_after_chapter_saved(
+        novel_id,
+        chapter_number,
+        content,
+        chapter_micro_beats=chapter_micro_beats,
+    )
 
 
 router = APIRouter(tags=["chapters"])
 
 
 # Request Models
+class ChapterMicroBeatPayload(BaseModel):
+    """写作指挥器微观节拍（与 chapter_summaries.micro_beats JSON 一致）"""
+    description: str = Field(..., min_length=1)
+    target_words: int = Field(default=0, ge=0)
+    focus: str = Field(default="pacing")
+    location_id: str = Field(default="")
+    active_action: str = Field(default="")
+    emotion_gap: str = Field(default="")
+    forbidden_drift: str = Field(default="")
+
+
+class ChapterMicroBeatsRequest(BaseModel):
+    micro_beats: List[ChapterMicroBeatPayload] = Field(default_factory=list)
+
+
 class UpdateChapterContentRequest(BaseModel):
     """更新章节内容请求"""
     content: str = Field(..., min_length=0, max_length=100000, description="章节内容")
+    micro_beats: Optional[List[ChapterMicroBeatPayload]] = Field(
+        None,
+        description="可选：本章指挥器节拍快照；落库后侧栏「微观」以知识库为准",
+    )
 
 
 class SaveChapterReviewRequest(BaseModel):
@@ -52,6 +95,21 @@ class ChapterReviewResponse(BaseModel):
     memo: str
     created_at: str
     updated_at: str
+
+
+class ChapterAIReviewRequest(BaseModel):
+    """AI 审阅请求"""
+    save: bool = Field(default=False, description="是否保存到章节审阅记录")
+
+
+class ChapterAIReviewResponse(BaseModel):
+    """AI 审阅响应"""
+    ok: bool
+    status: str
+    memo: str
+    saved: bool
+    score: int
+    suggestions: List[str] = Field(default_factory=list)
 
 
 class ChapterStructureResponse(BaseModel):
@@ -150,6 +208,36 @@ async def get_chapter(
     return chapter
 
 
+@router.get(
+    "/{novel_id}/chapters/{chapter_number}/guardrail-snapshot",
+    response_model=Optional[GuardrailCheckResponse],
+)
+@router.get(
+    "/{novel_id}/chapters/{chapter_number}/guardrail-snapshot/",
+    response_model=Optional[GuardrailCheckResponse],
+    include_in_schema=False,
+)
+async def get_guardrail_snapshot(
+    novel_id: str,
+    chapter_number: int = Path(..., gt=0, description="章节编号"),
+):
+    """最近一次保存后自动护栏（建议模式）的快照。
+
+    尚无快照时返回 HTTP 200 + JSON ``null``（避免客户端轮询刷 404 日志）。
+    快照在章节 PUT 保存并由章后管线写入 ``chapter_guardrail_snapshots`` 后可用。
+    """
+    from infrastructure.persistence.database.chapter_guardrail_snapshot_repository import (
+        ChapterGuardrailSnapshotRepository,
+    )
+    from infrastructure.persistence.database.connection import get_database
+
+    repo = ChapterGuardrailSnapshotRepository(get_database())
+    snap = repo.get(novel_id, chapter_number)
+    if not snap:
+        return None
+    return GuardrailCheckResponse.model_validate(snap)
+
+
 @router.post("/{novel_id}/chapters/{chapter_number}/ensure", response_model=ChapterDTO)
 async def ensure_chapter(
     novel_id: str,
@@ -164,6 +252,19 @@ async def ensure_chapter(
     return service.ensure_chapter(novel_id, chapter_number, request.title)
 
 
+@router.put("/{novel_id}/chapters/{chapter_number}/micro-beats")
+async def upsert_chapter_micro_beats(
+    novel_id: str,
+    request: ChapterMicroBeatsRequest,
+    chapter_number: int = Path(..., gt=0, description="章节编号"),
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
+):
+    """将指挥器微观节拍写入 chapter_summaries（不触发章后叙事 LLM）。"""
+    beats = [b.model_dump() for b in request.micro_beats]
+    knowledge_service.patch_chapter_micro_beats(novel_id, chapter_number, beats)
+    return {"ok": True, "chapter_number": chapter_number, "count": len(beats)}
+
+
 @router.put("/{novel_id}/chapters/{chapter_number}", response_model=ChapterDTO)
 async def update_chapter(
     novel_id: str,
@@ -172,6 +273,7 @@ async def update_chapter(
     chapter_number: int = Path(..., gt=0, description="章节编号"),
     service: ChapterService = Depends(get_chapter_service),
     pipeline: ChapterAftermathPipeline = Depends(get_chapter_aftermath_pipeline),
+    knowledge_service: KnowledgeService = Depends(get_knowledge_service),
 ):
     """更新章节内容，保存成功后后台执行统一章后管线（见 ChapterAftermathPipeline）。"""
     try:
@@ -184,14 +286,47 @@ async def update_chapter(
         raise HTTPException(status_code=404, detail=str(e))
 
     content = request.content
+    micro_beats_dicts: Optional[List[Dict[str, Any]]] = None
+    if request.micro_beats:
+        micro_beats_dicts = [b.model_dump() for b in request.micro_beats]
+        knowledge_service.patch_chapter_micro_beats(
+            novel_id, chapter_number, micro_beats_dicts
+        )
+
     background_tasks.add_task(
         _run_chapter_aftermath,
         novel_id,
         chapter_number,
         content,
         pipeline,
+        micro_beats_dicts,
+    )
+    background_tasks.add_task(
+        reindex_chapter_entity_mentions,
+        novel_id,
+        chapter_number,
+        content,
     )
     return chapter
+
+
+class UpdateChapterHintRequest(BaseModel):
+    """更新章节生成约束请求"""
+    generation_hint: str = Field(default="", max_length=2000, description="用户手写的本章生成约束文本")
+
+
+@router.patch("/{novel_id}/chapters/{chapter_number}/hint", response_model=ChapterDTO)
+async def update_chapter_hint(
+    novel_id: str,
+    request: UpdateChapterHintRequest,
+    chapter_number: int = Path(..., gt=0, description="章节编号"),
+    service: ChapterService = Depends(get_chapter_service),
+):
+    """更新章节生成约束文本，直接注入 AI 上下文（不触发章后管线）。"""
+    try:
+        return service.update_chapter_generation_hint(novel_id, chapter_number, request.generation_hint)
+    except EntityNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/{novel_id}/chapters/{chapter_number}/review", response_model=ChapterReviewResponse)
@@ -266,8 +401,10 @@ async def save_chapter_review(
 @router.post("/{novel_id}/chapters/{chapter_number}/review-ai")
 async def ai_review_chapter(
     novel_id: str,
+    request: ChapterAIReviewRequest = ChapterAIReviewRequest(),
     chapter_number: int = Path(..., gt=0, description="章节编号"),
-    service: ChapterService = Depends(get_chapter_service)
+    service: ChapterService = Depends(get_chapter_service),
+    ai_review_service: ChapterAIReviewService = Depends(get_chapter_ai_review_service),
 ):
     """AI 审阅章节
 
@@ -292,14 +429,34 @@ async def ai_review_chapter(
         if not chapter.content or not chapter.content.strip():
             raise HTTPException(status_code=400, detail="Chapter content is empty")
 
-        # TODO: 实现 AI 审阅逻辑
-        # 这里需要集成 LLM 服务进行审阅
-        return {
-            "message": "AI review not yet implemented",
-            "status": "pending"
-        }
+        result = await ai_review_service.review(
+            chapter_number=chapter_number,
+            chapter_title=chapter.title,
+            chapter_content=chapter.content,
+            chapter_outline="",
+            generation_hint=getattr(chapter, "generation_hint", "") or "",
+        )
+        saved = False
+        if request.save:
+            service.save_chapter_review(
+                novel_id,
+                chapter_number,
+                result.status,
+                result.memo,
+            )
+            saved = True
+        return ChapterAIReviewResponse(
+            ok=True,
+            status=result.status,
+            memo=result.memo,
+            saved=saved,
+            score=result.score,
+            suggestions=result.suggestions,
+        )
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ChapterAIReviewContractError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @router.get("/{novel_id}/chapters/{chapter_number}/structure", response_model=ChapterStructureResponse)
@@ -332,3 +489,95 @@ async def get_chapter_structure(
         )
     except EntityNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ─── 章节历史草稿（重新生成版本管理） ───────────────────────────────────
+
+class ChapterDraftResponse(BaseModel):
+    id: str
+    novel_id: str
+    chapter_id: str
+    chapter_number: int
+    content: str
+    outline: str
+    source: str
+    word_count: int
+    created_at: str
+
+
+class SaveDraftRequest(BaseModel):
+    """保存历史草稿请求（调用方在触发重新生成前快照当前内容）"""
+    source: str = Field(
+        default="pre_regen",
+        description="快照来源：pre_regen=重新生成前 | manual_save=手动 | auto_gen=首次生成",
+    )
+
+
+@router.post(
+    "/{novel_id}/chapters/{chapter_number}/drafts",
+    response_model=ChapterDraftResponse,
+    status_code=201,
+)
+async def save_chapter_draft(
+    novel_id: str,
+    chapter_number: int = Path(..., gt=0),
+    request: SaveDraftRequest = SaveDraftRequest(),
+    chapter_service: ChapterService = Depends(get_chapter_service),
+    draft_repo: ChapterDraftRepository = Depends(_get_draft_repo),
+):
+    """将当前章节内容快照为历史草稿（在触发重新生成之前调用）。
+
+    章节不存在或内容为空时返回 404 / 422。
+    """
+    chapter = chapter_service.get_chapter_by_novel_and_number(novel_id, chapter_number)
+    if chapter is None:
+        raise HTTPException(status_code=404, detail=f"章节 {chapter_number} 不存在")
+    if not chapter.content or not chapter.content.strip():
+        raise HTTPException(status_code=422, detail="章节内容为空，无需保存草稿")
+
+    record = draft_repo.save_draft(
+        novel_id=novel_id,
+        chapter_id=chapter.id,
+        chapter_number=chapter_number,
+        content=chapter.content,
+        outline=chapter.outline or "",
+        source=request.source,
+    )
+    return ChapterDraftResponse(
+        id=record.id,
+        novel_id=record.novel_id,
+        chapter_id=record.chapter_id,
+        chapter_number=record.chapter_number,
+        content=record.content,
+        outline=record.outline,
+        source=record.source,
+        word_count=record.word_count,
+        created_at=record.created_at,
+    )
+
+
+@router.get(
+    "/{novel_id}/chapters/{chapter_number}/drafts",
+    response_model=List[ChapterDraftResponse],
+)
+async def list_chapter_drafts(
+    novel_id: str,
+    chapter_number: int = Path(..., gt=0),
+    draft_repo: ChapterDraftRepository = Depends(_get_draft_repo),
+):
+    """列出章节的历史草稿（最新在前，最多 10 条）。"""
+    records = draft_repo.list_drafts(novel_id, chapter_number)
+    return [
+        ChapterDraftResponse(
+            id=r.id,
+            novel_id=r.novel_id,
+            chapter_id=r.chapter_id,
+            chapter_number=r.chapter_number,
+            content=r.content,
+            outline=r.outline,
+            source=r.source,
+            word_count=r.word_count,
+            created_at=r.created_at,
+        )
+        for r in records
+    ]

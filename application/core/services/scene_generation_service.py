@@ -70,7 +70,8 @@ class SceneGenerationService:
         # 2. 向量检索过滤上下文（POV 防火墙）
         relevant_context = await self._retrieve_relevant_context(
             scene=scene,
-            scene_analysis=scene_analysis
+            scene_analysis=scene_analysis,
+            bible_context=bible_context,
         )
 
         # 3. 构建提示词
@@ -100,21 +101,79 @@ class SceneGenerationService:
     async def _retrieve_relevant_context(
         self,
         scene: Scene,
-        scene_analysis
+        scene_analysis,
+        bible_context: Optional[Dict] = None,
     ) -> Dict:
         """向量检索：获取与场景相关的上下文
-
-        Phase 2.1 简化版：暂时返回空上下文
         """
-        # TODO: 实现向量检索
-        # - 检索相关人物信息（POV 防火墙）
-        # - 检索相关地点信息
-        # - 检索相关伏笔
-        return {
+        result = {
             "characters": [],
             "locations": [],
-            "foreshadowings": []
+            "foreshadowings": [],
+            "chapters": [],
+            "bible_snippets": [],
+            "facts": [],
+            "snippets": [],
         }
+        if not self.vector_store or not self.embedding_service:
+            return result
+
+        novel_id = str((bible_context or {}).get("novel_id") or "").strip()
+        if not novel_id:
+            return result
+
+        collection = f"novel_{novel_id}_chunks"
+        try:
+            collections = await self.vector_store.list_collections()
+            if collection not in set(collections or []):
+                return result
+
+            query_text = " ".join(
+                part for part in [
+                    scene.title,
+                    scene.goal,
+                    scene.pov_character,
+                    scene.location or "",
+                    scene.tone or "",
+                    " ".join(scene_analysis.characters or []),
+                    " ".join(scene_analysis.locations or []),
+                ]
+                if part
+            )
+            query_vector = await self.embedding_service.embed(query_text)
+            hits = await self.vector_store.search(
+                collection=collection,
+                query_vector=query_vector,
+                limit=8,
+            )
+        except Exception as e:
+            logger.warning("场景向量检索失败，已跳过：%s", e)
+            return result
+
+        for hit in hits or []:
+            payload = dict(hit.get("payload") or {})
+            if not payload:
+                continue
+            kind = str(payload.get("kind") or "").lower()
+            text = self._payload_text(payload)
+            if not text:
+                continue
+            item = {
+                "text": text,
+                "score": hit.get("score"),
+                "payload": payload,
+            }
+            if kind == "chapter_summary":
+                result["chapters"].append(item)
+            elif kind == "bible_snippet":
+                result["bible_snippets"].append(item)
+            elif self._looks_like_foreshadowing(payload):
+                result["foreshadowings"].append({"description": text, **item})
+            elif payload.get("triple_id") or payload.get("subject"):
+                result["facts"].append(item)
+            else:
+                result["snippets"].append(item)
+        return result
 
     def _build_scene_prompt(
         self,
@@ -124,60 +183,140 @@ class SceneGenerationService:
         previous_scenes: List[str],
         bible_context: Optional[Dict]
     ) -> Prompt:
-        """构建场景生成提示词"""
+        """构建场景生成提示词（CPMS 渲染）。"""
+        from infrastructure.ai.prompt_keys import SCENE_GENERATION
+        from infrastructure.ai.prompt_utils import render_required_prompt
 
-        system_prompt = """你是一位专业的小说作家，擅长根据场景大纲生成生动的正文。
-
-你的任务是根据场景信息生成 500-1000 字的正文，要求：
-1. 严格遵循场景目标（Scene Goal）
-2. 使用指定的 POV 角色视角叙述
-3. 体现场景的情绪基调（Tone）
-4. 与前置场景自然衔接
-5. 文笔流畅，细节生动
-
-注意事项：
-- 不要偏离场景目标
-- 不要引入场景大纲中未提及的重大情节
-- 保持与前置场景的连贯性
-- 字数控制在 500-1000 字之间
-"""
-
-        # 构建用户提示词
-        user_prompt = f"""场景信息：
-标题：{scene.title}
-目标：{scene.goal}
-POV 角色：{scene.pov_character}
-地点：{scene.location or '未指定'}
-情绪基调：{scene.tone or '未指定'}
-预估字数：{scene.estimated_words}
-
-"""
-
-        # 添加场记分析结果
+        # 构建变量
+        analysis_parts = []
         if scene_analysis.characters:
-            user_prompt += f"\n涉及角色：{', '.join(scene_analysis.characters)}"
+            analysis_parts.append(f"涉及角色：{', '.join(scene_analysis.characters)}")
         if scene_analysis.locations:
-            user_prompt += f"\n涉及地点：{', '.join(scene_analysis.locations)}"
+            analysis_parts.append(f"涉及地点：{', '.join(scene_analysis.locations)}")
         if scene_analysis.emotional_state:
-            user_prompt += f"\n情绪状态：{scene_analysis.emotional_state}"
+            analysis_parts.append(f"情绪状态：{scene_analysis.emotional_state}")
+        analysis_block = "\n".join(analysis_parts)
 
-        # 添加前置场景上下文
-        if previous_scenes:
-            user_prompt += "\n\n前置场景摘要：\n"
-            for i, prev_scene in enumerate(previous_scenes[-2:], 1):  # 最多显示最近 2 个场景
-                # 截取前 200 字作为摘要
-                summary = prev_scene[:200] + "..." if len(prev_scene) > 200 else prev_scene
-                user_prompt += f"\n场景 {i}：\n{summary}\n"
+        previous_scenes_parts = []
+        for i, prev_scene in enumerate(previous_scenes[-2:], 1):
+            summary = prev_scene[:200] + "..." if len(prev_scene) > 200 else prev_scene
+            previous_scenes_parts.append(f"场景 {i}：\n{summary}")
+        previous_scenes_block = "\n".join(previous_scenes_parts)
 
-        # 添加相关上下文（如果有）
-        if relevant_context.get("foreshadowings"):
-            user_prompt += "\n\n相关伏笔（可以在场景中呼应）：\n"
-            for foreshadowing in relevant_context["foreshadowings"][:3]:
-                user_prompt += f"- {foreshadowing.get('description', 'N/A')}\n"
+        foreshadow_parts = []
+        for foreshadowing in relevant_context.get("foreshadowings", [])[:3]:
+            foreshadow_parts.append(f"- {foreshadowing.get('description', 'N/A')}")
+        foreshadowing_block = "\n".join(foreshadow_parts)
+        if foreshadowing_block:
+            foreshadowing_block = f"相关伏笔：\n{foreshadowing_block}\n"
 
-        user_prompt += "\n\n请生成场景正文："
-
-        return Prompt(
-            system=system_prompt,
-            user=user_prompt
+        bible_context_block = self._format_bible_context(
+            bible_context,
+            pov_character=scene.pov_character,
         )
+        retrieved_context_block = self._format_retrieved_context(relevant_context)
+
+        variables = {
+            "title": scene.title,
+            "goal": scene.goal,
+            "pov_character": scene.pov_character,
+            "location": scene.location or "未指定",
+            "tone": scene.tone or "未指定",
+            "estimated_words": str(scene.estimated_words),
+            "analysis_block": analysis_block,
+            "previous_scenes_block": previous_scenes_block,
+            "foreshadowing_block": foreshadowing_block,
+            "bible_context_block": bible_context_block,
+            "retrieved_context_block": retrieved_context_block,
+        }
+
+        return render_required_prompt(SCENE_GENERATION, variables)
+
+    @staticmethod
+    def _payload_text(payload: Dict) -> str:
+        for key in ("text", "summary", "description", "content"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        subject = str(payload.get("subject") or "").strip()
+        predicate = str(payload.get("predicate") or "").strip()
+        obj = str(payload.get("object") or "").strip()
+        return " ".join(part for part in [subject, predicate, obj] if part).strip()
+
+    @staticmethod
+    def _looks_like_foreshadowing(payload: Dict) -> bool:
+        haystack = " ".join(
+            str(payload.get(key) or "")
+            for key in (
+                "kind",
+                "subject_type",
+                "object_type",
+                "subject",
+                "predicate",
+                "object",
+                "text",
+                "description",
+            )
+        ).lower()
+        return any(token in haystack for token in ("foreshadow", "伏笔", "暗线"))
+
+    @staticmethod
+    def _format_retrieved_context(relevant_context: Dict) -> str:
+        lines: List[str] = []
+        sections = (
+            ("相关章节摘要", "chapters"),
+            ("相关设定片段", "bible_snippets"),
+            ("相关事实", "facts"),
+            ("相关记忆片段", "snippets"),
+        )
+        for title, key in sections:
+            items = relevant_context.get(key) or []
+            if not items:
+                continue
+            lines.append(f"{title}：")
+            for item in items[:3]:
+                text = str(item.get("text") or "").strip()
+                if text:
+                    lines.append(f"- {text[:240]}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_bible_context(
+        bible_context: Optional[Dict],
+        *,
+        pov_character: str,
+    ) -> str:
+        if not bible_context:
+            return ""
+        lines: List[str] = []
+        characters = bible_context.get("characters") or []
+        if characters:
+            lines.append("可见人物锚点：")
+            for char in characters[:6]:
+                name = str(char.get("name") or "").strip()
+                public_profile = str(
+                    char.get("public_profile")
+                    or char.get("description")
+                    or ""
+                ).strip()
+                if not name and not public_profile:
+                    continue
+                marker = "（当前 POV）" if name and name == pov_character else ""
+                lines.append(f"- {name}{marker}：{public_profile[:160]}")
+        locations = bible_context.get("locations") or []
+        if locations:
+            lines.append("地点锚点：")
+            for loc in locations[:5]:
+                name = str(loc.get("name") or "").strip()
+                desc = str(loc.get("description") or "").strip()
+                if name or desc:
+                    lines.append(f"- {name}：{desc[:160]}")
+        world_settings = bible_context.get("world_settings") or []
+        if world_settings:
+            lines.append("世界规则：")
+            for item in world_settings[:4]:
+                name = str(item.get("name") or "").strip()
+                desc = str(item.get("description") or "").strip()
+                if name or desc:
+                    lines.append(f"- {name}：{desc[:160]}")
+        return "\n".join(lines)

@@ -15,6 +15,7 @@ export interface ForeshadowEntry {
   suggested_resolve_chapter: number | null
   resolve_chapter_window: number | null
   importance: 'low' | 'medium' | 'high' | 'critical'
+  is_priority_for_chapter: boolean
   created_at: string
 }
 
@@ -37,12 +38,20 @@ export interface UpdateForeshadowPayload {
   suggested_resolve_chapter?: number
   resolve_chapter_window?: number
   importance?: 'low' | 'medium' | 'high' | 'critical'
+  is_priority_for_chapter?: boolean
 }
 
 export const foreshadowApi = {
-  list: (novelId: string, status?: 'pending' | 'consumed') =>
+  /**
+   * 获取伏笔列表
+   * @param novelId 小说 ID
+   * @param status 可选筛选状态
+   * @param config 可选 AxiosRequestConfig（支持 timeout / signal 等覆盖全局配置）
+   */
+  list: (novelId: string, status?: 'pending' | 'consumed', config?: Record<string, unknown>) =>
     apiClient.get<ForeshadowEntry[]>(`/novels/${novelId}/foreshadow-ledger`, {
       params: status ? { status } : {},
+      ...config,
     }) as Promise<ForeshadowEntry[]>,
 
   get: (novelId: string, entryId: string) =>
